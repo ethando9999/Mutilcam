@@ -1,0 +1,279 @@
+package main
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"hash/crc32"
+	"net"
+	"sync"
+	"time"
+	"os"
+	"path/filepath"
+)
+
+const (
+	udpPort         = ":9090"
+	chunkSize       = 2048
+	checksumSize    = 4
+	sequenceSize    = 4
+	resendSize		= 2
+	endChunk        = "END"
+	unixSocket      = "/mnt/ramdisk/unix_socket"
+	frameTimeoutSec = 5 // Thời gian chờ tối đa để nhận đủ các gói tin trong frame
+)
+
+var (
+	frameTimers         = sync.Map{} // Lưu thời gian bắt đầu xử lý frame theo địa chỉ client
+	receivedPacketsLock sync.Mutex
+)
+
+// calculateChecksum tính toán checksum CRC32 của dữ liệu.
+func calculateChecksum(data []byte) uint32 {
+	return crc32.ChecksumIEEE(data)
+}
+
+func main() {
+	// Bắt đầu lắng nghe UDP.
+	conn, err := net.ListenPacket("udp", udpPort)
+	if err != nil {
+		fmt.Println("Error starting UDP listener:", err)
+		return
+	}
+	defer conn.Close()
+	fmt.Println("UDP server is listening on", udpPort)
+
+	var frameCount int
+	startTime := time.Now()
+	var isSuccess bool = true
+	receivedPackets := &map[uint32][]byte{}
+	totalPackets := uint32(0)
+	
+	for {
+		// Dynamically allocate buffer size based on success flag
+		bufferSize := chunkSize + checksumSize + sequenceSize
+		if !isSuccess {
+			bufferSize += resendSize
+		}
+		buffer := make([]byte, bufferSize)
+
+		// Đọc dữ liệu từ UDP (blocking)
+		n, addr, err := conn.ReadFrom(buffer)
+		if err != nil {
+			fmt.Println("Error reading from UDP:", err)
+			continue
+		}
+
+		// Bắt đầu đo thời gian cho frame từ địa chỉ này nếu chưa có.
+		frameTimers.Store(addr.String(), time.Now())	
+
+		// Sau khi nhận dữ liệu xong, xử lý bất đồng bộ
+		go handleFrame(buffer[:n], addr, conn, receivedPackets, &totalPackets, &isSuccess)
+
+		// Thống kê FPS.
+		frameCount++
+		elapsed := time.Since(startTime)
+		if elapsed.Seconds() >= 1 {
+			fps := float64(frameCount) / elapsed.Seconds()
+			fmt.Printf("FPS: %.2f\n", fps)	
+			frameCount = 0
+			startTime = time.Now()
+		}
+	}
+}
+
+// handleFrame xử lý từng frame nhận qua UDP.
+func handleFrame(data []byte, addr net.Addr, conn net.PacketConn, receivedPackets *map[uint32][]byte, totalPackets *uint32, isSuccess *bool) {
+	// var buffer bytes.Buffer
+	// var totalPackets uint32
+
+	if len(data) > 0 {
+		if len(data) < sequenceSize+checksumSize {
+			fmt.Println("Incomplete header received, skipping chunk.")
+			return
+		}
+
+		sequence := binary.BigEndian.Uint32(data[:sequenceSize])
+		checksum := binary.BigEndian.Uint32(data[sequenceSize : sequenceSize+checksumSize])
+
+		receivedPacketsLock.Lock()
+		if (*receivedPackets)[sequence] != nil {
+			fmt.Printf("Duplicate packet received: %d\n", sequence)
+			receivedPacketsLock.Unlock()
+			return
+		}
+		receivedPacketsLock.Unlock()  
+		
+		resend := binary.BigEndian.Uint32(data[sequenceSize+checksumSize+chunkSize:])
+		fmt.Println("resend: %d\n", resend)
+		if resend != 0 {
+			if *isSuccess{
+				fmt.Printf("Frame was successfully received, skipping chunk.")
+				return
+			}
+		}
+
+		// Nếu nhận được tín hiệu kết thúc frame.
+		if sequence == 0 && checksum == 0 {
+			*totalPackets = binary.BigEndian.Uint32(data[sequenceSize+checksumSize:])
+			handle_end_frame(receivedPackets, totalPackets, addr, conn, isSuccess)
+			return
+		}
+
+		// Tách chunk dữ liệu.
+		chunk := data[sequenceSize+checksumSize:]
+		calculatedChecksum := calculateChecksum(chunk)
+		fmt.Printf("Sequence %d - Received checksum: %d, Calculated checksum: %d\n", sequence, checksum, calculatedChecksum)
+
+		if calculatedChecksum != checksum {
+			fmt.Printf("Checksum mismatch for sequence %d. Expected %d, got %d.\n", sequence, calculatedChecksum, checksum)
+			// data = data[sequenceSize+checksumSize+len(chunk):]
+			return
+		} else {
+			fmt.Printf("Checksum passed for sequence %d.\n", sequence)
+		}
+
+		// Lưu gói tin đã nhận.
+		receivedPacketsLock.Lock()
+		(*receivedPackets)[sequence] = chunk
+		receivedPacketsLock.Unlock()
+		// fmt.Printf("Received sequence: %d. Current receivedPackets: %v\n", sequence, receivedPackets)
+
+		// handle_end_frame(receivedPackets, totalPackets, addr, conn)
+		// data = data[sequenceSize+checksumSize+len(chunk):]
+	}
+
+	// Xử lý timeout.
+	if startTimeRaw, ok := frameTimers.Load(addr.String()); ok {
+		startTime := startTimeRaw.(time.Time) // Chuyển kiểu an toàn
+		if time.Since(startTime).Seconds() > frameTimeoutSec {
+			fmt.Printf("Timeout for client %s. Dropping frame.\n", addr.String())
+			frameTimers.Delete(addr.String())
+		}
+	}
+}
+
+
+func handle_end_frame(receivedPackets *map[uint32][]byte, totalPackets *uint32, addr net.Addr, conn net.PacketConn, isSuccess *bool) {
+	if *totalPackets > 0 {
+		fmt.Printf("End of frame received. Total packets expected: %d.\n", totalPackets)
+		if len(*receivedPackets) > int(*totalPackets) {
+			fmt.Printf("These packet was received, reset receivedPacekets")
+			*receivedPackets = make(map[uint32][]byte)
+			return
+		}
+
+		// Get udp address cua pi client
+		udpAddr, ok := addr.(*net.UDPAddr)
+		if !ok {
+			fmt.Println("Error: PI Address is not a UDP address")
+		}
+		addrIP := udpAddr.IP
+		// Tao dia chi moi voi port 9091
+		newAddr := &net.UDPAddr{
+			IP:   addrIP,
+			Port: 9091,
+		}
+
+		// Kiểm tra gói tin bị thiếu.
+		var missingPackets []uint32
+		for i := uint32(1); i <= *totalPackets; i++ {
+			receivedPacketsLock.Lock()
+			if (*receivedPackets)[i] == nil {
+				missingPackets = append(missingPackets, i)
+			}
+			receivedPacketsLock.Unlock()
+		}
+
+		// Nếu có gói tin bị thiếu, yêu cầu Python gửi lại.
+		if len(missingPackets) > 0 {
+			fmt.Printf("Missing packets: %v\n", missingPackets)
+			retryMessage := []byte(fmt.Sprintf("FAILED:%s", joinUint32Array(missingPackets, ","))) 
+			_, err := conn.WriteTo(retryMessage, newAddr)
+			if err != nil {
+				fmt.Println("Error sending missing packets request:", err)
+			} else {
+				fmt.Println("Missing packets request sent to ", newAddr)
+			}
+			// *totalPackets = 0
+			*isSuccess = false
+		} else {
+			// Nếu không thiếu gói tin
+			fmt.Println("totalPackets ", *totalPackets)
+			var buffer bytes.Buffer
+			for i := uint32(1); i <= *totalPackets; i++ {
+				buffer.Write((*receivedPackets)[i])
+			}
+			// Gửi dữ liệu cho server Python (ví dụ: Unix socket).					
+			sendToPython(buffer.Bytes())
+			*isSuccess = true
+			// gửi thông báo thành công.
+			successMessage := []byte("SUCCESS")
+			_, err := conn.WriteTo(successMessage, newAddr)
+			if err != nil {
+				fmt.Println("Error sending success message:", err)
+			} else {
+				fmt.Println("Success message sent to client.")
+			}
+
+			saveFrame(buffer.Bytes())
+			
+			// Reset receivedPackets.
+			receivedPacketsLock.Lock()
+			*receivedPackets = make(map[uint32][]byte)
+			receivedPacketsLock.Unlock()	
+
+		}
+
+	}
+
+	// Dừng xử lý frame cho địa chỉ này.
+	frameTimers.Delete(addr.String())
+}
+
+// joinUint32Array nối các số uint32 thành chuỗi phân cách bởi dấu phẩy.
+func joinUint32Array(arr []uint32, sep string) string {
+	var result string
+	for i, v := range arr {
+		if i > 0 {
+			result += sep
+		}
+		result += fmt.Sprintf("%d", v)
+	}
+	return result
+}
+
+// sendToPython gửi frame đã xử lý tới Python qua Unix socket.
+func sendToPython(frame []byte) {
+	conn, err := net.Dial("unix", unixSocket)
+	if err != nil {
+		fmt.Println("Error connecting to Python socket:", err)
+		return
+	}
+	defer conn.Close()
+
+	_, err = conn.Write(frame)
+	if err != nil {
+		fmt.Println("Error sending frame to Python:", err)
+	} else {
+		fmt.Println("Frame successfully sent to Unix socket.")
+	}
+}
+
+// saveFrame lưu frame vào file
+func saveFrame(frame []byte) {
+	outputDir := "golang_received"
+	// Tạo thư mục nếu chưa tồn tại
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		fmt.Println("Error creating output directory:", err)
+		return
+	}
+	timestamp := time.Now().Format("20060102_150405")
+	filename := filepath.Join(outputDir, fmt.Sprintf("frame-%s.jpg", timestamp))
+
+	if err := os.WriteFile(filename, frame, 0644); err != nil {
+		fmt.Println("Error saving frame:", err)
+	} else {
+		fmt.Println("Frame saved to:", filename)
+	}
+}

@@ -1,0 +1,8 @@
+[package]
+name = "yolo_tflite"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tflite = "0.9.8"
+ndarray = "0.15"

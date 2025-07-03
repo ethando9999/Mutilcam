@@ -1,0 +1,164 @@
+package main
+
+import (
+	"bytes"
+	"crypto/tls"
+	"encoding/binary"
+	"fmt"
+	"hash/crc32"
+	"io"
+	"net"
+	"sync"
+	"time"
+)
+
+const (
+	tcpPort      = ":9090" // Định dạng port phải kèm dấu ":".
+	chunkSize    = 1024
+	checksumSize = 4
+	sequenceSize = 4
+	headerSize   = 8 // Header 8 byte để chứa kích thước frame lớn hơn 4 byte.
+	endChunk     = "END"
+	certFile     = "server.crt"
+	keyFile      = "server.key"
+	unixSocket   = "/mnt/ramdisk/unix_socket" // Đường dẫn Unix socket.
+)
+
+var (
+	queue     = make(chan []byte, 10)
+	queueLock sync.Mutex
+)
+
+// calculateChecksum tính toán checksum CRC32 của dữ liệu.
+func calculateChecksum(data []byte) uint32 {
+	return crc32.ChecksumIEEE(data)
+}
+
+func main() {
+	// Tải chứng chỉ SSL.
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		fmt.Println("Error loading SSL certificate:", err)
+		return
+	}
+
+	config := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	// Bắt đầu lắng nghe TLS.
+	listener, err := tls.Listen("tcp", tcpPort, config)
+	if err != nil {
+		fmt.Println("Error starting TLS listener:", err)
+		return
+	}
+	defer listener.Close()
+	fmt.Println("TLS server is listening on", tcpPort)
+
+	// Chấp nhận kết nối và xử lý.
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection:", err)
+			continue
+		}
+		go handleConnection(conn)
+	}
+}
+
+// handleConnection xử lý từng kết nối đến.
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Biến FPS.
+	var frameCount int
+	startTime := time.Now()
+
+	for {
+		var buffer bytes.Buffer
+
+		// Đọc dữ liệu cho từng frame.
+		for {
+			// Đọc sequence (4 bytes) và checksum (4 bytes) trước.
+			header := make([]byte, sequenceSize+checksumSize)
+			_, err := io.ReadFull(conn, header)
+			if err != nil {
+				if err == io.EOF {
+					fmt.Println("Client closed connection or no more data.")
+					return
+				}
+				// fmt.Println("Error reading header:", err)
+				continue // Tiếp tục đọc dữ liệu mới nếu xảy ra lỗi nhỏ.
+			}
+
+			// Tách sequence và checksum.
+			sequence := binary.BigEndian.Uint32(header[:sequenceSize])
+			checksum := binary.BigEndian.Uint32(header[sequenceSize:])
+
+			// Nếu nhận được tín hiệu kết thúc frame.
+			if sequence == 0 && checksum == 0 {
+				fmt.Println("End of frame or client finished sending.")
+				break
+			}
+
+			// Đọc chunk dữ liệu.
+			chunk := make([]byte, chunkSize)
+			n, err := conn.Read(chunk)
+			if err != nil {
+				if err == io.EOF {
+					fmt.Println("Client closed connection or no more data.")
+					return
+				}
+				fmt.Println("Error reading chunk:", err)
+				continue // Tiếp tục nếu lỗi nhỏ.
+			}
+
+			// Kiểm tra checksum.
+			calculatedChecksum := calculateChecksum(chunk[:n])
+			if calculatedChecksum != checksum {
+				fmt.Printf("Checksum mismatch for sequence %d. Expected %d, got %d.\n", sequence, calculatedChecksum, checksum)
+				continue // Bỏ qua chunk lỗi và tiếp tục nhận.
+			}
+
+			// Ghi chunk dữ liệu vào buffer.
+			buffer.Write(chunk[:n])
+
+			// Nếu chunk là chuỗi kết thúc.
+			if string(chunk[:n]) == endChunk {
+				break
+			}
+		}
+
+		// Cập nhật bộ đếm frame.
+		frameCount++
+
+		// Tính toán FPS.
+		elapsed := time.Since(startTime)
+		if elapsed.Seconds() >= 1 {
+			fps := float64(frameCount) / elapsed.Seconds()
+			fmt.Printf("FPS: %.2f\n", fps)
+			frameCount = 0
+			startTime = time.Now()
+		}
+
+		// Gửi frame tới server Python.
+		sendToPython(buffer.Bytes())
+	}
+}
+
+// sendToPython gửi frame tới server Python qua Unix socket.
+func sendToPython(frame []byte) {
+	// Kết nối tới Unix Socket của Python.
+	conn, err := net.Dial("unix", unixSocket)
+	if err != nil {
+		fmt.Println("Error connecting to Python socket:", err)
+		return
+	}
+	defer conn.Close()
+
+	// Gửi frame tới Python.
+	_, err = conn.Write(frame)
+	if err != nil {
+		fmt.Println("Error sending frame to Python:", err)
+	} else {
+		fmt.Println("Frame successfully sent to Unix socket.")
+	}
+}

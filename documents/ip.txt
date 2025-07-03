@@ -1,0 +1,4 @@
+RPI_client: pi003@192.168.2.143 sudo:123456
+RPI_server: pi003@192.168.2.69 sudo:123456
+BPI: bananapi@192.168.2.100 sudo: 123456
+orangepi: orangepi@192.168.1.120 sudo: 123456, wifi:abcD1234

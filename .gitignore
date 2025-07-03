@@ -1,0 +1,39 @@
+# server 
+server.crt
+server.key
+
+# venv
+venv
+go.mod
+env
+ven 
+rknn_venv
+
+# tmp
+received_frames 
+
+# source
+sources
+*.mp4
+
+__pycache__
+
+*.log
+
+*.pt
+*.tflite
+
+output
+models
+
+# data
+data
+calibration_data
+fer2013/
+dataset
+
+face_id/
+fastreid/
+
+
+vec0.so
