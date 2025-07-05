@@ -95,20 +95,6 @@ async def create_database(
                 );
 
                 ----------------------------------------------------------------
-                -- PersonsCenter
-                ----------------------------------------------------------------
-                DROP TABLE IF EXISTS PersonsCenter;
-                CREATE TABLE IF NOT EXISTS PersonsCenter (
-                    person_id TEXT PRIMARY KEY,
-                    centroid_f BLOB,       -- vec_f32(...) nếu đã định nghĩa UDF
-                    radius_f REAL,
-                    n_feat INTEGER,
-                    FOREIGN KEY (person_id) REFERENCES Persons(person_id)
-                        ON DELETE CASCADE
-
-                );
-
-                ----------------------------------------------------------------
                 -- Cameras & Frames
                 ----------------------------------------------------------------
                 CREATE TABLE IF NOT EXISTS Cameras (

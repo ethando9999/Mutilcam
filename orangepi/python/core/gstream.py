@@ -8,6 +8,8 @@ import cv2
 from concurrent.futures import ThreadPoolExecutor
 from utils.rmbg_mog import BackgroundRemover
 from utils.logging_python_orangepi import get_logger
+import os
+from concurrent.futures import TimeoutError as FutureTimeoutError
 
 logger = get_logger(__name__)
 
@@ -86,6 +88,53 @@ class GStreamerFramePutter:
         self.glib_thread.join()
         self.executor.shutdown(wait=True)
 
+    def start_recording(self, output_path: str, fourcc_str='avc1', fps=30):
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        self._recording = True
+
+        def _record_loop():
+            writer = None
+            logger.info(f"Bắt đầu ghi video vào {output_path}")
+
+            while self._recording:
+                # Khởi một future để lấy frame từ asyncio.Queue
+                future = asyncio.run_coroutine_threadsafe(self.frame_queue.get(), self.loop)
+                try:
+                    # Chờ tối đa 0.1s
+                    frame = future.result(timeout=0.1)
+                except FutureTimeoutError:
+                    # Nếu timeout, quay lại vòng while
+                    continue
+
+                # Nếu sentinel None, thoát loop
+                if frame is None:
+                    break
+
+                # Khởi tạo writer từ frame đầu tiên
+                if writer is None:
+                    h, w = frame.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+                    writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+                    if not writer.isOpened():
+                        logger.error(f"Không thể tạo VideoWriter với {output_path}")
+                        return
+
+                writer.write(frame)
+
+            if writer: 
+                writer.release()
+            logger.info("Đã dừng ghi video")
+
+        self._record_thread = threading.Thread(target=_record_loop, daemon=True)
+        self._record_thread.start()
+
+    def stop_recording(self):
+        self._recording = False
+        # Gửi sentinel để thread nhận ra phải dừng
+        asyncio.run_coroutine_threadsafe(self.frame_queue.put(None), self.loop)
+        if hasattr(self, '_record_thread'):
+            self._record_thread.join()
+
 async def start_putter(frame_queue: asyncio.Queue):
     """Chạy GStreamerFramePutter và chuyển frame từ queue nội bộ sang queue ngoài."""
     putter = GStreamerFramePutter()
@@ -104,10 +153,20 @@ async def start_putter(frame_queue: asyncio.Queue):
         await frame_queue.put(None)  # Đặt sentinel để báo hiệu dừng
         logger.info("Đã dừng GStreamer capture")
 
-# # Ví dụ chạy
-# if __name__ == "__main__":
-#     async def main():
-#         external_queue = asyncio.Queue(maxsize=100)
-#         await start_putter(external_queue)
+if __name__ == "__main__":
+    async def main():
+        external_queue = asyncio.Queue(maxsize=100)
+        putter = GStreamerFramePutter()
+        putter.start()
+        # Bắt đầu ghi video, lưu vào videos/output.avi
+        putter.start_recording("videos/output.mp4", fourcc_str='avc1', fps=30)
 
-#     asyncio.run(main())
+        # Đồng thời bạn có thể xử lý/external_queue như bình thường
+        # Ví dụ dừng sau 60 giây:
+        await asyncio.sleep(60)
+
+        # Dừng capture và ghi
+        putter.stop_recording()
+        putter.stop()
+
+    asyncio.run(main())

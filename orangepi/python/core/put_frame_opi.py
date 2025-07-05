@@ -5,6 +5,7 @@ import time
 import os
 
 from utils.rmbg_mog import BackgroundRemover
+from .call_slaver import CallSlave
 
 logger = get_logger(__name__)
 
@@ -18,6 +19,7 @@ class FramePutter:
         self.frame_dir = "frames"
         self.cam_index = 1 
         self.background_remover = BackgroundRemover()
+        self.slave = CallSlave()
         logger.info("Start FramePutter successfully") 
 
     async def put_frames_queue(self, frame_queue: asyncio.Queue):
