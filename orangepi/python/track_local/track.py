@@ -1,14 +1,9 @@
 import numpy as np
 from collections import OrderedDict, deque
 
-from .kalman_filter import KalmanFilter, chi2inv95
+from .kalman_filter import KalmanFilter2D, chi2inv95
 
 from utils.logging_python_orangepi import get_logger
-
-# Giả sử KalmanFilter đã được định nghĩa/import như bạn đưa:
-# - state vector 8-d: [cx, cy, w, h, vx, vy, vw, vh]
-# - measurement cũng [cx, cy, w, h]
-# - phương thức predict, update, gating_distance như đã có.
 
 logger = get_logger(__name__)
 
@@ -18,7 +13,7 @@ CHI2INV95_4 = chi2inv95[4]
 
 class TrackingManager:
     """
-    Quản lý track state cho mỗi person_id, dùng KalmanFilter (8-d) + appearance.
+    Quản lý track state cho mỗi person_id, dùng KalmanFilter2D (8-d) + appearance.
     Mỗi track lưu:
       - mean (8-d), covariance (8x8)
       - last_frame_id, time_since_update
@@ -31,14 +26,14 @@ class TrackingManager:
                  appearance_thresh: float = 0.5,
                  feature_history_len: int = 5):
         """
-        kalman_filter: instance của KalmanFilter đã định nghĩa.
+        kalman_filter: instance của KalmanFilter2D đã định nghĩa.
         gating_threshold: squared Mahalanobis threshold (dùng full-state, do measurement dim=4).
         max_time_lost: số frame không update tối đa trước khi xóa track.
         proximity_thresh: ngưỡng IoU tối thiểu để candidate (ví dụ 0.7).
         appearance_thresh: ngưỡng cosine similarity tối thiểu để match appearance.
         feature_history_len: độ dài lịch sử feature để moving average.
         """
-        self.kf = KalmanFilter()
+        self.kf = KalmanFilter2D()
         # tracks: OrderedDict giữ thứ tự insert (không bắt buộc nhưng duy trì stable order)
         # key: person_id, value: dict chứa mean, covariance, last_frame_id, time_since_update, feature_history
         self.tracks = OrderedDict()

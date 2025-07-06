@@ -181,7 +181,7 @@ async def start_putter(frame_queue: asyncio.Queue):
     frame_putter = FramePutter()
     try:
         video_name = "output_4k_video.mp4"
-        video_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+        video_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "video")
         video_path = os.path.join(video_path, video_name)
         # await frame_putter.put_frame_from_video(frame_queue, video_path) 
         await frame_putter.put_frames_queue(frame_queue)
