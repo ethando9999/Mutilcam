@@ -1,7 +1,7 @@
 import numpy as np
 from collections import OrderedDict, deque
 
-from .kalman_filter import KalmanFilter2D, chi2inv95
+from .kalman_filter_2D import KalmanFilter2D, chi2inv95
 
 from utils.logging_python_orangepi import get_logger
 
