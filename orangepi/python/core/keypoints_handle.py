@@ -1,5 +1,3 @@
-import numpy as np
-
 # Danh sách các điểm keypoint theo chuẩn COCO
 COCO_KEYPOINTS = [
     (0, "Mũi"),
@@ -20,64 +18,77 @@ COCO_KEYPOINTS = [
     (15, "Mắt cá chân trái"),
     (16, "Mắt cá chân phải")
 ]
+# file: python/core/keypoints_handle.py (Đã tối ưu)
 
-# Định nghĩa các chỉ số để code dễ đọc hơn
-NOSE_IDX = 0
-LEFT_EYE_IDX = 1
-RIGHT_EYE_IDX = 2
-LEFT_EAR_IDX = 3
-RIGHT_EAR_IDX = 4
+import numpy as np
+
+# --- Các hằng số (Giữ nguyên) ---
+NOSE_IDX = 0; LEFT_EYE_IDX = 1; RIGHT_EYE_IDX = 2; LEFT_EAR_IDX = 3; RIGHT_EAR_IDX = 4
+LEFT_SHOULDER_IDX = 5; RIGHT_SHOULDER_IDX = 6; LEFT_HIP_IDX = 11; RIGHT_HIP_IDX = 12
+
+# --- Các hàm gốc (Giữ nguyên) ---
+def is_valid_kpt(point):
+    """Kiểm tra một keypoint có hợp lệ không (tọa độ > 0)."""
+    return point is not None and point[0] > 0 and point[1] > 0
 
 def get_head_center(keypoints: list):
+    """Lấy vị trí của mũi. Nếu không có, tính trung tâm các điểm khác trên đầu."""
+    if is_valid_kpt(keypoints[NOSE_IDX]):
+        return tuple(map(int, keypoints[NOSE_IDX][:2]))
+    
+    head_indices = [LEFT_EYE_IDX, RIGHT_EYE_IDX, LEFT_EAR_IDX, RIGHT_EAR_IDX]
+    valid_points = [keypoints[i][:2] for i in head_indices if is_valid_kpt(keypoints[i])]
+    
+    if valid_points:
+        return tuple(np.mean(valid_points, axis=0).astype(int))
+    return None
+
+def get_torso_box(keypoints, full_box):
+    """Tạo một bounding box chỉ chứa phần thân người từ keypoint vai và hông."""
+    shoulder_indices = [LEFT_SHOULDER_IDX, RIGHT_SHOULDER_IDX]
+    hip_indices = [LEFT_HIP_IDX, RIGHT_HIP_IDX]
+
+    valid_shoulders = [keypoints[i][:2] for i in shoulder_indices if is_valid_kpt(keypoints[i])]
+    valid_hips = [keypoints[i][:2] for i in hip_indices if is_valid_kpt(keypoints[i])]
+    
+    if not valid_shoulders or not valid_hips:
+        return full_box
+
+    torso_points = np.array(valid_shoulders + valid_hips)
+    
+    xmin, ymin = np.min(torso_points, axis=0)
+    xmax, ymax = np.max(torso_points, axis=0)
+
+    padding_x = (xmax - xmin) * 0.15
+    padding_y = (ymax - ymin) * 0.10
+
+    torso_xmin = max(full_box[0], int(xmin - padding_x))
+    torso_ymin = max(full_box[1], int(ymin - padding_y))
+    torso_xmax = min(full_box[2], int(xmax + padding_x))
+    torso_ymax = min(full_box[3], int(ymax + padding_y))
+
+    return (torso_xmin, torso_ymin, torso_xmax, torso_ymax)
+
+# <<< ======================= HÀM MỚI ĐỂ SỬA LỖI ======================= >>>
+def adjust_keypoints_to_box(keypoints: np.ndarray, box: tuple) -> np.ndarray:
     """
-    Lấy vị trí của mũi. Nếu không có mũi, tính toán vị trí trung tâm của
-    các điểm khác trên đầu (mắt, tai).
+    Chuyển đổi tọa độ keypoints từ hệ quy chiếu của frame gốc
+    sang hệ quy chiếu của một bounding box đã cắt.
 
     Args:
-        keypoints (list): Một danh sách gồm 17 keypoint. Mỗi keypoint có thể là
-                          một tuple (x, y) hoặc (x, y, confidence), hoặc None.
-                          Một điểm không được phát hiện thường có tọa độ (0, 0).
+        keypoints (np.array): Mảng keypoints gốc (17, 3).
+        box (tuple): Bounding box (xmin, ymin, xmax, ymax) đã dùng để cắt.
 
     Returns:
-        tuple: Tọa độ (x, y) của mũi hoặc trung tâm đầu.
-        None: Nếu không có điểm nào trên đầu được phát hiện.
+        np.array: Mảng keypoints mới với tọa độ đã được điều chỉnh.
     """
+    adjusted_kpts = keypoints.copy()
+    xmin, ymin, _, _ = box
     
-    # --- 1. Hàm phụ để kiểm tra một điểm có hợp lệ không ---
-    def is_valid(point):
-        # Trả về False nếu điểm là None hoặc có tọa độ (0,0)
-        if point is None or (point[0] == 0 and point[1] == 0):
-            return False
-        return True
-
-    # --- 2. Kiểm tra điểm Mũi (Nose) ---
-    nose_point = keypoints[NOSE_IDX]
-    if is_valid(nose_point):
-        # Nếu mũi tồn tại, trả về tọa độ (x, y) của nó
-        return (int(nose_point[0]), int(nose_point[1]))
-
-    # --- 3. Nếu Mũi không tồn tại, tính toán trung tâm của các điểm khác trên đầu ---
-    else:
-        head_parts_indices = [
-            LEFT_EYE_IDX,
-            RIGHT_EYE_IDX,
-            LEFT_EAR_IDX,
-            RIGHT_EAR_IDX
-        ]
-        
-        valid_head_points = []
-        for idx in head_parts_indices:
-            point = keypoints[idx]
-            if is_valid(point):
-                valid_head_points.append(point)
-
-        # Nếu có các điểm hợp lệ trên đầu
-        if valid_head_points:
-            # Dùng numpy để tính trung bình cộng các tọa độ một cách dễ dàng
-            points_array = np.array(valid_head_points)[:, :2] # Chỉ lấy x, y
-            center_point = np.mean(points_array, axis=0)
-            return (int(center_point[0]), int(center_point[1]))
-        
-        # --- 4. Nếu không có điểm nào trên đầu hợp lệ ---
-        else:
-            return None
+    # Chỉ điều chỉnh các keypoint hợp lệ
+    valid_kpts_mask = adjusted_kpts[:, :2].sum(axis=1) > 0
+    adjusted_kpts[valid_kpts_mask, 0] -= xmin
+    adjusted_kpts[valid_kpts_mask, 1] -= ymin
+    
+    return adjusted_kpts
+# <<< ===================== KẾT THÚC HÀM MỚI ===================== >>>

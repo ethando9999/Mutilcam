@@ -5,7 +5,7 @@ import time
 import os
 
 from utils.rmbg_mog import BackgroundRemover
-from .call_slaver import CallSlave
+# from .call_slaver import CallSlave
 
 logger = get_logger(__name__)
 
@@ -19,7 +19,7 @@ class FramePutter:
         self.frame_dir = "frames"
         self.cam_index = 1 
         self.background_remover = BackgroundRemover()
-        self.slave = CallSlave()
+        # self.slave = CallSlave()
         logger.info("Start FramePutter successfully") 
 
     async def put_frames_queue(self, frame_queue: asyncio.Queue):
@@ -94,34 +94,70 @@ class FramePutter:
             logger.info("Đã dừng camera và enqueue sentinel None")
 
     async def put_frame_from_video(self, frame_queue: asyncio.Queue, video_path="/home/ubuntu/orangepi/python/data/output_4k_video.mp4"):
-        """Read frames from a video file and put them into the frame queue."""
+        """
+        Đọc frame từ video, lưu vào file tạm và đưa đường dẫn vào hàng đợi.
+        """
         cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            logger.error(f"❌ Không thể mở file video tại: {video_path}")
+            # Gửi tín hiệu kết thúc ngay nếu không mở được video
+            await frame_queue.put(None)
+            return
+
         frame_index = 0
         self.start_time = asyncio.get_event_loop().time()
         
+        # --- Tạo thư mục lưu frame nếu chưa có ---
+        os.makedirs(self.frame_dir, exist_ok=True)
+        logger.info(f"Các khung hình sẽ được lưu tạm tại: {os.path.abspath(self.frame_dir)}")
+
         try:
-            while True:
+            while not self.stop_event.is_set():
                 ret, frame = cap.read()
                 if not ret or frame is None or frame.size == 0:
-                    logger.info(f"End of video or invalid frame at index {frame_index}")
+                    logger.info(f"Hết video hoặc khung hình không hợp lệ tại index {frame_index}")
                     break
 
-                # Tăng timeout lên 5 giây để giảm nguy cơ mất khung hình
+                # --- Logic chính đã được sửa ---
+                # 1. Tạo đường dẫn file cho khung hình hiện tại
+                frame_path = os.path.join(
+                    self.frame_dir,
+                    f"frame_{frame_index:06d}.jpg"
+                )
+
+                # 2. Lưu khung hình xuống file (bất đồng bộ để không block)
+                # Dùng `await asyncio.to_thread` là cách hiện đại và an toàn hơn
+                save_success = await asyncio.to_thread(cv2.imwrite, frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                
+                if not save_success:
+                    logger.error(f"Không thể lưu khung hình xuống file: {frame_path}")
+                    frame_index += 1
+                    continue
+
+                # 3. Đưa vào queue đúng định dạng (camera_id, frame_path)
+                item_to_put = (self.cam_index, frame_path)
+                
                 try:
-                    await asyncio.wait_for(frame_queue.put(frame), timeout=15.0)
-                    logger.info(f"Putting frame {frame_index} from video")
+                    # Đặt timeout hợp lý để tránh bị block quá lâu
+                    await asyncio.wait_for(frame_queue.put(item_to_put), timeout=5.0)
+                    logger.info(f"Đã đưa vào hàng đợi: {item_to_put}")
                     frame_index += 1
                     self._update_fps()
                 except asyncio.TimeoutError:
-                    logger.warning(f"Timeout putting frame {frame_index} into queue")
+                    logger.warning(f"Timeout khi đưa khung hình {frame_index} vào hàng đợi. Hàng đợi có thể đã đầy.")
+                    # Xóa file đã lưu nếu không đưa vào queue được để tránh rác
+                    os.remove(frame_path)
+                    # Chờ một chút trước khi thử lại
+                    await asyncio.sleep(0.1)
                     continue
 
         except Exception as e:
-            logger.error(f"Error reading video: {e}")
+            logger.error(f"Lỗi khi đọc video: {e}", exc_info=True)
         finally:
             cap.release()
+            # Gửi tín hiệu kết thúc cho consumer
             await frame_queue.put(None)
-            logger.info("Video capture released")
+            logger.info("Đã giải phóng video và gửi tín hiệu kết thúc.")
 
     async def put_frames_queue_from_camera(self, frame_queue: asyncio.Queue):
         """Đọc frame từ camera và put vào queue cho tới khi stop_event được set.
@@ -181,10 +217,10 @@ async def start_putter(frame_queue: asyncio.Queue):
     frame_putter = FramePutter()
     try:
         video_name = "output_4k_video.mp4"
-        video_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "video")
+        video_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
         video_path = os.path.join(video_path, video_name)
-        # await frame_putter.put_frame_from_video(frame_queue, video_path) 
-        await frame_putter.put_frames_queue(frame_queue)
+        await frame_putter.put_frame_from_video(frame_queue, video_path) 
+        # await frame_putter.put_frames_queue(frame_queue)
     except asyncio.CancelledError:
         logger.info("Putter task was cancelled.")
         frame_putter.stop()

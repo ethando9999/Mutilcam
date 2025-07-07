@@ -548,7 +548,7 @@ async def start_id(processing_queue: asyncio.Queue, person_reid: PersonReID = No
     """Asynchronous function to process frames từ processing_queue."""
     logger.info("Starting ID processing")
     if person_reid is None:
-        from config import DEFAULT_CONFIG
+        from orangepi.python.config_x import DEFAULT_CONFIG
         allowed = [
             'output_dir',
             'feature_threshold',

@@ -554,7 +554,7 @@ async def start_id(processing_queue: asyncio.Queue, person_reid: PersonReID = No
     logger.info("Starting ID processing")
     created_local = False
     if person_reid is None:
-        from config import DEFAULT_CONFIG
+        from orangepi.python.config_x import DEFAULT_CONFIG
         allowed = [
             "output_dir",
             "feature_threshold",

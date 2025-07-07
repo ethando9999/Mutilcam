@@ -102,6 +102,6 @@ async def log_detections(db_path='database.db'):
 
 
 if __name__ == "__main__":
-    from config import DEVICE_ID_CONFIG_1 as ID_CONFIG
+    from orangepi.python.config_x import DEVICE_ID_CONFIG_1 as ID_CONFIG
     db_path = ID_CONFIG.get("db_path", "database.db") 
     asyncio.run(log_all_ids(db_path)) 

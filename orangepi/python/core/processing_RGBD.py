@@ -1,199 +1,242 @@
+# file: python/core/processing_RGBD.py (Phiên bản Tối ưu Toàn diện)
+
 import asyncio
 import cv2
+import os
+from datetime import datetime
+import numpy as np
+
+# Giả định các module này tồn tại và hoạt động đúng
 from utils.logging_python_orangepi import get_logger
-import time
-from utils.yolo_pose_rknn import HumanDetection
+from utils.yolo_pose import HumanDetection
 from utils.pose_color_signature_new import PoseColorSignatureExtractor
 from utils.cut_body_part import extract_body_parts_from_frame
 from .stereo_projector import StereoProjector
-from .keypoints_handle import get_head_center
-import os
+from .keypoints_handle import get_head_center, get_torso_box, adjust_keypoints_to_box
+from .height_estimator import HeightEstimator
+import config
 
-logger = get_logger(__name__)
+logger = get_logger(__name__) 
 
 class FrameProcessor:
-    def __init__(self, batch_size=2): 
+    """
+    Xử lý các lô frame RGB-D, từ phát hiện người cho đến trích xuất thông tin chi tiết.
+    Phiên bản này được tối ưu để hoạt động ổn định và hiệu quả trên thiết bị biên.
+    """
+    def __init__(self, calib_path: str, batch_size: int = 2):
+        """
+        Khởi tạo tất cả các module cần thiết cho việc xử lý.
+        """
         self.detector = HumanDetection()
         self.pose_processor = PoseColorSignatureExtractor()
-        self.stereo_projector = StereoProjector("config/calib_v2.npz")
-        self.fps_avg = 0.0
-        self.call_count = 0
-        self.semaphore = asyncio.Semaphore(4) 
+        self.stereo_projector = StereoProjector(calib_file_path=calib_path)
+        
+        mtx_rgb = self.stereo_projector.params.get('mtx_rgb')
+        if mtx_rgb is None: raise ValueError("mtx_rgb không có trong file hiệu chỉnh.")
+        self.height_estimator = HeightEstimator(mtx_rgb)
+        
+        # Giới hạn số lượng người được xử lý song song để tránh quá tải
+        self.semaphore = asyncio.Semaphore(4)
         self.batch_size = batch_size
+        
+        self.debug_dir = os.path.join(config.OPI_CONFIG.get("results_dir", "results"), "debug_projection")
+        os.makedirs(self.debug_dir, exist_ok=True)
+        
+        logger.info("FrameProcessor (Tối ưu Toàn diện) đã được khởi tạo.")
 
-    # (Các hàm async helper giữ nguyên)
-    async def run_detection_async(self, frame):
-        return await asyncio.to_thread(self.detector.run_detection, frame)
-    
-    async def process_body_parts_async(self, frame, keypoints):
-        return await asyncio.to_thread(extract_body_parts_from_frame, frame, keypoints)
+    # --------------------------------------------------------------------
+    # CÁC HÀM PHỤ TRỢ (HELPERS)
+    # --------------------------------------------------------------------
 
-    async def get_depths_async(self, rgb_points, rgb_height, rgb_width, tof_depth_map):
-        depths = await asyncio.to_thread(
-            self.stereo_projector.get_depths_for_rgb_points,
-            rgb_points, rgb_height, rgb_width, tof_depth_map
-        )
-        return depths
-
-    # <<< HÀM ĐƯỢC CẬP NHẬT (Thêm điều kiện lọc theo độ sâu) >>>
-    async def process_human_async(self, human_box, map_keypoints, frame_id, box, keypoints, tof_depth_map, rgb_height, rgb_width):
+    def _is_detection_valid(self, box: tuple, keypoints: np.ndarray, frame_shape: tuple) -> bool:
         """
-        Xử lý một người, tính toán điểm đầu 3D và chỉ trả về kết quả nếu
-        độ sâu của đầu < 4000mm (4 mét).
+        Xác thực chất lượng đầu vào từ YOLO.
+        Một phát hiện chỉ hợp lệ khi cả Bounding Box và Keypoints đều đạt chuẩn.
+        """
+        # 1. Kiểm tra Bounding Box
+        x1, y1, x2, y2 = box
+        h, w = frame_shape[:2]
+        if np.any(np.isnan(box)) or np.any(np.isinf(box)): return False
+        if x1 >= x2 or y1 >= y2: return False
+        if x2 < 0 or y2 < 0 or x1 > w or y1 > h: return False
+        
+        # 2. Kiểm tra Keypoints: Yêu cầu có ít nhất 4 keypoints hợp lệ
+        if keypoints.shape[1] >= 3:
+            valid_kpts_count = np.sum(keypoints[:, 2] > 0.3) # Ngưỡng confidence
+        else:
+            valid_kpts_count = np.sum(np.sum(keypoints[:, :2], axis=1) > 0)
+        
+        if valid_kpts_count < 4:
+            logger.debug(f"Phát hiện có ít keypoints ({valid_kpts_count}). Bỏ qua.")
+            return False
+            
+        return True
+
+    async def _run_in_executor(self, func, *args):
+        """Hàm helper để chạy các hàm blocking trong luồng riêng."""
+        return await asyncio.to_thread(func, *args)
+
+    async def save_debug_images(self, base_name, rgb_frame, tof_depth_frame, rgb_box, tof_box):
+        """Lưu các ảnh gỡ lỗi một cách bất đồng bộ để không làm chậm luồng chính."""
+        try:
+            tof_color = cv2.normalize(tof_depth_frame, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+            tof_color_map = cv2.applyColorMap(tof_color, cv2.COLORMAP_JET)
+            x1, y1, x2, y2 = rgb_box
+            rgb_crop = rgb_frame[y1:y2, x1:x2]
+            
+            # Ghi file
+            if rgb_crop.size > 0: await self._run_in_executor(cv2.imwrite, os.path.join(self.debug_dir, f"{base_name}_crop_rgb.png"), rgb_crop)
+            if tof_box:
+                tx1, ty1, tx2, ty2 = tof_box
+                tof_crop = tof_color_map[ty1:ty2, tx1:tx2]
+                if tof_crop.size > 0: await self._run_in_executor(cv2.imwrite, os.path.join(self.debug_dir, f"{base_name}_crop_tof.png"), tof_crop)
+                cv2.rectangle(tof_color_map, (tx1, ty1), (tx2, ty2), (0, 255, 0), 2)
+
+            cv2.rectangle(rgb_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            await self._run_in_executor(cv2.imwrite, os.path.join(self.debug_dir, f"{base_name}_full_rgb_boxed.png"), rgb_frame)
+            await self._run_in_executor(cv2.imwrite, os.path.join(self.debug_dir, f"{base_name}_full_tof_boxed.png"), tof_color_map)
+        except Exception as e:
+            logger.error(f"Lỗi khi lưu ảnh debug: {e}")
+
+    # --------------------------------------------------------------------
+    # HÀM XỬ LÝ CHÍNH (CORE PROCESSING)
+    # --------------------------------------------------------------------
+
+    async def process_human_async(self, frame_id: int, rgb_frame: np.ndarray, tof_depth_map: np.ndarray, box: tuple, keypoints: np.ndarray):
+        """
+        Luồng xử lý tối ưu cho một người được phát hiện.
         """
         async with self.semaphore:
             try:
-                head_center_kp = get_head_center(map_keypoints)
-                head_point_3d = None
+                # BƯỚC 1: Tính khoảng cách bằng vùng thân (torso) để tăng ổn định
+                torso_box = get_torso_box(keypoints, box)
+                distance_mm, status = await self._run_in_executor(self.stereo_projector.get_robust_distance, torso_box, tof_depth_map)
 
-                # Chạy tác vụ trích xuất các bộ phận cơ thể song song
-                body_parts_task = asyncio.create_task(self.process_body_parts_async(human_box, map_keypoints))
+                # BƯỚC 2: Lọc khoảng cách NGAY LẬP TỨC (Yêu cầu 4 mét)
+                if status != "OK" or distance_mm is None or not (100 < distance_mm < 4000):
+                    return None # Bỏ qua ngay, không xử lý thêm
 
-                if head_center_kp:
-                    # Lấy độ sâu cho điểm trung tâm đầu
-                    depths_task = asyncio.create_task(
-                        self.get_depths_async([head_center_kp], rgb_height, rgb_width, tof_depth_map)
-                    )
-                    body_parts, depths_list = await asyncio.gather(body_parts_task, depths_task)
-                    
-                    if depths_list and depths_list[0] is not None:
-                        head_depth = depths_list[0]
+                # BƯỚC 3: Nếu khoảng cách hợp lệ, mới chạy các tác vụ nặng còn lại
+                logger.info(f"✅ Người hợp lệ trong phạm vi 4m. Khoảng cách: {distance_mm/1000:.2f}m. Bắt đầu xử lý sâu...")
+                distance_m = distance_mm / 1000.0
 
-                        # =================================================================
-                        # <<< THAY ĐỔI CHÍNH: LỌC THEO ĐỘ SÂU >>>
-                        # Nếu độ sâu lớn hơn hoặc bằng 4000mm (4m), bỏ qua người này.
-                        if head_depth >= 4000:
-                            logger.debug(f"Bỏ qua người trong frame {frame_id} vì ở quá xa (độ sâu: {head_depth}mm).")
-                            return None # Trả về None để không đưa vào hàng đợi xử lý
-                        # =================================================================
+                # Chuẩn bị và chạy song song các tác vụ còn lại
+                height_task = self._run_in_executor(self.height_estimator.estimate, keypoints, distance_m)
+                
+                human_box_img = rgb_frame[box[1]:box[3], box[0]:box[2]]
+                if human_box_img.size == 0: return None
+                
+                adjusted_keypoints = adjust_keypoints_to_box(keypoints, box)
+                body_parts_task = self._run_in_executor(extract_body_parts_from_frame, human_box_img, adjusted_keypoints)
+                projection_task = self._run_in_executor(self.stereo_projector.project_rgb_box_to_tof, box, tof_depth_map)
 
-                        # Nếu người ở trong phạm vi cho phép, tạo điểm 3D
-                        head_point_3d = (head_center_kp[0], head_center_kp[1], head_depth)
-                else:
-                    # Nếu không có điểm đầu, vẫn lấy kết quả body_parts nhưng không có độ sâu
-                    body_parts = await body_parts_task
-                    logger.warning(f"Không tìm thấy trung tâm đầu cho người trong frame {frame_id}, bỏ qua tính toán độ sâu.")
+                (est_height_m, height_status), body_parts_boxes, tof_box_projected = await asyncio.gather(
+                    height_task, body_parts_task, projection_task
+                )
 
-                # Trả về cấu trúc dữ liệu hoàn chỉnh nếu người không bị lọc
+                # Kiểm tra kết quả
+                if not est_height_m: return None
+                
+                # Lưu ảnh debug chỉ cho các trường hợp thành công
+                if tof_box_projected:
+                    debug_base_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S%f')}_F{frame_id}"
+                    asyncio.create_task(self.save_debug_images(debug_base_name, rgb_frame.copy(), tof_depth_map.copy(), box, tof_box_projected))
+
+                head_center_kp = get_head_center(keypoints)
+                head_point_3d = (head_center_kp[0], head_center_kp[1], distance_mm) if head_center_kp else None
+                
+                logger.info(f"✅✅ Xử lý hoàn tất: Khoảng cách={distance_m:.2f}m, Chiều cao={est_height_m:.2f}m ({height_status})")
+
                 return {
-                    "frame_id": frame_id,
-                    "human_box": human_box,
-                    "body_parts": body_parts,
-                    "head_point_3d": head_point_3d,
-                    "bbox": box,
-                    "map_keypoints": map_keypoints,
+                    "frame_id": frame_id, "human_box": human_box_img, "body_parts": body_parts_boxes,
+                    "head_point_3d": head_point_3d, "bbox": box, "map_keypoints": keypoints,
+                    "distance_mm": distance_mm, "est_height_m": est_height_m, "height_status": height_status
                 }
-            
             except Exception as e:
                 logger.error(f"Lỗi xử lý người cho frame {frame_id}: {e}", exc_info=True)
                 return None
 
-    # <<< HÀM NÀY KHÔNG CẦN THAY ĐỔI >>>
-    # Logic `if result:` đã xử lý việc `process_human_async` trả về `None`
     async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue):
-        """Xử lý khung hình từ hàng đợi, tối ưu hóa bằng cách chạy detection song song."""
+        """
+        Vòng lặp chính: Lấy dữ liệu từ hàng đợi, điều phối tác vụ xử lý.
+        """
         frame_number = 0
         while True:
-            start_time = time.time()
-            batch_frames = []
+            # Lấy lô dữ liệu từ hàng đợi
+            batch_data_paths = []
             try:
-                item = await asyncio.wait_for(frame_queue.get(), timeout=1.0)
-                cam_idx, frame_path, amp_path, depth_data = item
-                if os.path.exists(frame_path):
-                    frame = cv2.imread(frame_path)
-                    if frame is not None:
-                        batch_frames.append((cam_idx, frame, depth_data))
-                frame_queue.task_done()
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                logger.info("process_frame_queue bị hủy.")
-                break
+                item = await asyncio.wait_for(frame_queue.get(), timeout=5.0)
+                if item is None: break
+                batch_data_paths.append(item); frame_queue.task_done()
+            except (asyncio.TimeoutError, asyncio.CancelledError): continue
             
-            while len(batch_frames) < self.batch_size:
+            while len(batch_data_paths) < self.batch_size:
                 try:
                     item = frame_queue.get_nowait()
-                    cam_idx, frame_path, amp_path, depth_data = item
-                    if os.path.exists(frame_path):
-                        frame = cv2.imread(frame_path)
-                        if frame is not None:
-                            batch_frames.append((cam_idx, frame, depth_data))
-                    frame_queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
-            
-            if not batch_frames:
-                continue
-            
-            try:
-                detection_tasks = [self.run_detection_async(frame) for _, frame, _ in batch_frames]
-                detection_results = await asyncio.gather(*detection_tasks, return_exceptions=True)
+                    if item is None: frame_queue.put_nowait(None); break 
+                    batch_data_paths.append(item); frame_queue.task_done()
+                except asyncio.QueueEmpty: break
+            if not batch_data_paths: continue
 
-                for i, (cam_idx, frame, depth_data) in enumerate(batch_frames):
-                    detection_result = detection_results[i]
-                    if isinstance(detection_result, Exception):
-                        logger.error(f"Lỗi detection trên frame {i} của batch: {detection_result}")
-                        continue
+            try:
+                # Đọc dữ liệu từ file
+                loaded_data_map = {}
+                frames_for_detection = []
+                for i, (rgb_path, depth_path, amp_path) in enumerate(batch_data_paths):
+                    try:
+                        rgb_frame = cv2.imread(rgb_path)
+                        depth_frame = np.load(depth_path) if depth_path and os.path.exists(depth_path) else None
+                        if rgb_frame is not None and depth_frame is not None:
+                            frames_for_detection.append(rgb_frame)
+                            loaded_data_map[i] = (rgb_frame, depth_frame)
+                    except Exception as e:
+                        logger.error(f"Lỗi khi đọc file dữ liệu {rgb_path}: {e}")
+                
+                if not frames_for_detection: continue
+
+                # Chạy detection song song
+                detection_results = await asyncio.gather(*[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection], return_exceptions=True)
+                
+                # Tạo tác vụ xử lý cho từng người
+                all_human_tasks = []
+                for i, detection_result in enumerate(detection_results):
+                    if not detection_result or isinstance(detection_result, Exception): continue
                     
+                    original_rgb, original_depth = loaded_data_map[i]
                     keypoints_data, boxes_data = detection_result
                     
-                    if not boxes_data:
-                        logger.warning(f"Không phát hiện người trong khung hình từ camera {cam_idx}.")
-                        continue
+                    for kpts, box in zip(keypoints_data, boxes_data):
+                        # Áp dụng bộ lọc chất lượng tại đây
+                        if not self._is_detection_valid(box, kpts, original_rgb.shape):
+                            logger.warning(f"Phát hiện không hợp lệ (box hoặc keypoints). Box: {box}. Bỏ qua.")
+                            continue
 
-                    rgb_h, rgb_w, _ = frame.shape
-                    human_processing_tasks = []
-                    for index, (keypoints, box) in enumerate(zip(keypoints_data, boxes_data)):
-                        human_box = frame[box[1]:box[3], box[0]:box[2]]
-                        map_keypoints = self.detector.transform_keypoints_to_local(box, keypoints)
-                        
-                        task = asyncio.create_task(self.process_human_async(
-                            human_box, map_keypoints, frame_number + i, box, keypoints, 
-                            depth_data, rgb_h, rgb_w
-                        ))
-                        human_processing_tasks.append(task)
-
-                    if human_processing_tasks:
-                        results = await asyncio.gather(*human_processing_tasks, return_exceptions=True)
-                        for result in results:
-                            if isinstance(result, Exception):
-                                logger.error(f"Lỗi trong xử lý người: {result}", exc_info=True)
-                                continue
-                            # Logic này không đổi: nếu result là None (do bị lọc), nó sẽ không được đưa vào hàng đợi.
-                            if result:
-                                result["camera_id"] = cam_idx
-                                await processing_queue.put(result)
-
-                frame_number += len(batch_frames)
-                duration = time.time() - start_time
-                fps_current = len(batch_frames) / duration if duration > 0 else 0
-                self.fps_avg = (self.fps_avg * self.call_count + fps_current) / (self.call_count + 1)
-                self.call_count += 1
-                if frame_number % 10 == 0:
-                    logger.info(f"FPS xử lý: {self.fps_avg:.2f}, Hàng đợi vào: {frame_queue.qsize()}, Hàng đợi ra: {processing_queue.qsize()}")
-
-            except asyncio.CancelledError:
-                logger.info("Tác vụ xử lý batch bị hủy.")
-                break
+                        all_human_tasks.append(
+                            self.process_human_async(frame_number + i, original_rgb, original_depth, box, kpts)
+                        )
+                
+                # Thu thập kết quả
+                if all_human_tasks:
+                    processing_results = await asyncio.gather(*all_human_tasks, return_exceptions=True)
+                    for result in processing_results:
+                        if result and not isinstance(result, Exception):
+                            result["camera_id"] = config.OPI_CONFIG.get("device_id", "opi_01")
+                            await processing_queue.put(result)
+                
+                frame_number += len(frames_for_detection)
             except Exception as e:
-                logger.error(f"Lỗi trong xử lý lô: {e}", exc_info=True)
-                await asyncio.sleep(1)
+                logger.error(f"Lỗi không mong muốn trong xử lý lô: {e}", exc_info=True)
 
-        logger.info("process_frame_queue kết thúc.")
-
-
-
-async def start_processor(frame_queue: asyncio.Queue, processing_queue: asyncio.Queue):
-    """Khởi động worker xử lý song song."""
-    logger.info("Khởi động worker xử lý...")
-    processor = FrameProcessor()
-    task = asyncio.create_task(processor.process_frame_queue(frame_queue, processing_queue))
+# --------------------------------------------------------------------
+# HÀM KHỞI TẠO WORKER
+# --------------------------------------------------------------------
+async def start_processor(frame_queue: asyncio.Queue, processing_queue: asyncio.Queue, calib_path: str):
+    """
+    Khởi tạo và chạy FrameProcessor worker. 
+    """
+    logger.info("Khởi động worker xử lý (Phiên bản cuối cùng)...")
     try:
-        await task
-    except asyncio.CancelledError:
-        logger.info("Tác vụ xử lý đang được hủy...")
-        task.cancel()
-        await task
-        logger.info("Tác vụ xử lý đã được hủy.")
-    finally:
-        thread_pool.shutdown(wait=True)
+        processor = FrameProcessor(calib_path=calib_path, batch_size=2)
+        await processor.process_frame_queue(frame_queue, processing_queue)
+    except Exception as e:
+        logger.error(f"Lỗi nghiêm trọng trong start_processor: {e}", exc_info=True)

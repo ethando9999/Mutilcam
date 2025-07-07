@@ -11,7 +11,7 @@ import uuid
 # import sqlite_vec
 from sklearn.metrics.pairwise import cosine_similarity
 from utils.pose_color_signature_new import preprocess_color
-from track_local.track import TrackingManager
+from track_local.track import TrackingManager 
 
 from utils.logging_python_orangepi import get_logger
 

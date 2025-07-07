@@ -3,7 +3,7 @@ import aiosqlite
 from contextlib import asynccontextmanager
 import sqlite_vec
 
-from config import FEATURE_DIMENSIONS, FACE_DIMENSIONS, VEC0_PATH
+from orangepi.python.config_x import FEATURE_DIMENSIONS, FACE_DIMENSIONS, VEC0_PATH
 from utils.logging_python_orangepi import get_logger
 logger = get_logger(__name__)
 

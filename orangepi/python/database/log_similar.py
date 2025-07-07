@@ -111,6 +111,6 @@ async def log_similar(db_path="temp.db",
         logger.exception(f"log_similar() failed: {e}")
 
 if __name__ == "__main__":
-    from config import ID_CONFIG
+    from orangepi.python.config_x import ID_CONFIG
     db_path = ID_CONFIG.get("db_path", "database.db") 
     asyncio.run(log_similar(db_path)) 

@@ -10,7 +10,7 @@ import time
 from utils.yolo_pose_rknn import HumanDetection
 from utils.pose_color_signature_new import PoseColorSignatureExtractor
 from utils.cut_body_part import extract_body_parts_from_frame
-import os
+import os 
 
 logger = get_logger(__name__)
 
@@ -23,7 +23,7 @@ class FrameProcessor:
         self.pose_processor = PoseColorSignatureExtractor()
         self.fps_avg = 0.0
         self.call_count = 0
-        self.semaphore = asyncio.Semaphore(4)
+        self.semaphore = asyncio.Semaphore(4) 
         self.batch_size = batch_size
 
     async def run_detection_async(self, frame) -> Tuple[np.ndarray, List]:
