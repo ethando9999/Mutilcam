@@ -42,7 +42,7 @@ class SlaveCommunicator:
             self.sock = None
             return False
 
-    async def _recv_all(self, num_bytes: int) -> Optional[bytes]:
+    async def _recv_all(self, num_bytes: int) -> Optional[bytes]: 
         """Nhận chính xác `num_bytes` từ socket một cách an toàn."""
         buffer = bytearray()
         loop = asyncio.get_running_loop()

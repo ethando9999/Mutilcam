@@ -12,7 +12,7 @@ from datetime import datetime
 from orangepi.python.utils.yolo_pose_rknn import HumanDetection
 from modules.stereo_projector import StereoProjector
 from modules.height_estimator import HeightEstimator
-from utils.kalman_filter import SimpleKalmanFilter
+from orangepi.python.utils.simple_kalman_filter import SimpleKalmanFilter
 from utils.logging_config import setup_logging, get_logger
 
 # --- CẤU HÌNH ---

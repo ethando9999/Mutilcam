@@ -1,65 +1,111 @@
-# modules/height_estimator.py
+# file: modules/height_estimator.py
+
 import numpy as np
 from utils.logging_python_orangepi import get_logger
+from utils.kalman_filter import SimpleKalmanFilter # <-- NHẬP KHẨU
 
 logger = get_logger(__name__)
 
 class HeightEstimator:
-    def __init__(self, camera_matrix):
+    def __init__(self, camera_matrix, process_variance=0.01, measurement_variance=0.5):
         """
-        Khởi tạo bộ ước tính chiều cao với ma trận nội tại của camera RGB.
-        
+        Khởi tạo bộ ước tính chiều cao.
+
         Args:
-            camera_matrix (np.array): Ma trận nội tại (mtx_rgb) 3x3 của camera RGB.
+            camera_matrix (np.array): Ma trận nội tại (mtx_rgb) 3x3 của camera.
+            process_variance (float): Độ nhiễu của quá trình cho bộ lọc Kalman.
+                                      Mô tả mức độ thay đổi của chiều cao thật giữa các khung hình.
+                                      Vì chiều cao người không đổi, giá trị này nên nhỏ.
+            measurement_variance (float): Độ nhiễu của phép đo cho bộ lọc Kalman.
+                                          Mô tả mức độ tin tưởng vào phép đo chiều cao thô.
+                                          Giá trị này nên lớn hơn process_variance vì phép đo bị nhiễu.
         """
         self.mtx_rgb = camera_matrix
-        # Lấy tiêu cự theo trục y (fy) từ ma trận. Vị trí (1, 1) trong ma trận.
         self.fy = self.mtx_rgb[1, 1]
         if self.fy <= 0:
             raise ValueError("Focal length (fy) must be positive.")
-        logger.info(f"Height Estimator initialized with focal length (fy): {self.fy:.2f} pixels.")
+        
+        # MỚI: Các tham số và bộ chứa cho bộ lọc Kalman
+        self.process_variance = process_variance
+        self.measurement_variance = measurement_variance
+        self.kalman_filters = {} # Dictionary để lưu bộ lọc cho mỗi track_id
 
-    def estimate(self, person_keypoints, distance_in_meters):
+        logger.info(f"Height Estimator initialized with fy: {self.fy:.2f} px.")
+        logger.info(f"Kalman Filter params: process_var={process_variance}, measurement_var={measurement_variance}")
+
+
+    def _calculate_raw_height(self, person_keypoints, distance_in_meters):
         """
-        Ước tính chiều cao của một người từ các keypoints và khoảng cách đã biết.
-
-        Args:
-            person_keypoints (np.array): Mảng keypoints (shape: 17, 2) cho một người.
-            distance_in_meters (float): Khoảng cách từ camera đến người đó (đơn vị: mét).
-
-        Returns:
-            float: Chiều cao ước tính (mét), hoặc None nếu không đủ keypoint.
+        Hàm nội bộ để tính chiều cao thô (chưa qua bộ lọc).
         """
-        # Lọc ra các keypoint hợp lệ (có tọa độ > 0)
         visible_keypoints = person_keypoints[np.all(person_keypoints > 0, axis=1)]
         
-        # Cần ít nhất 2 điểm để xác định chiều cao pixel
         if len(visible_keypoints) < 2:
-            logger.warning("Not enough visible keypoints to estimate height.")
+            logger.warning("Not enough visible keypoints for raw height estimation.")
             return None
 
-        # Tìm y_min (điểm cao nhất trên ảnh) và y_max (điểm thấp nhất trên ảnh)
         y_min = np.min(visible_keypoints[:, 1])
         y_max = np.max(visible_keypoints[:, 1])
-
-        # Chiều cao của người trên ảnh (tính bằng pixel)
         height_in_pixels = y_max - y_min
 
-        if height_in_pixels <= 10: # Bỏ qua nếu chiều cao pixel quá nhỏ (nhiễu)
+        if height_in_pixels <= 10:
             return None
 
-        # Áp dụng công thức tam giác đồng dạng
-        # ChieuCaoThuc = (ChieuCaoPixel * KhoangCach) / TieuCu
         estimated_height_meters = (height_in_pixels * distance_in_meters) / self.fy
         
-        logger.debug(
-            f"Height estimation: h_pixels={height_in_pixels}, "
-            f"distance={distance_in_meters:.2f}m, fy={self.fy:.2f} -> h_real={estimated_height_meters:.2f}m"
-        )
-        
-        # Chỉ trả về kết quả hợp lý (ví dụ: chiều cao từ 0.5m đến 2.5m)
         if 0.5 < estimated_height_meters < 2.5:
             return estimated_height_meters
         else:
-            logger.warning(f"Unreasonable height calculated: {estimated_height_meters:.2f}m. Discarding.")
+            logger.warning(f"Unreasonable raw height: {estimated_height_meters:.2f}m. Discarding.")
             return None
+
+    def estimate(self, person_keypoints, distance_in_meters, track_id):
+        """
+        Ước tính và làm mịn chiều cao của một người bằng bộ lọc Kalman.
+
+        Args:
+            person_keypoints (np.array): Mảng keypoints (shape: 17, 2).
+            distance_in_meters (float): Khoảng cách từ camera đến người.
+            track_id (int or str): ID định danh duy nhất cho người đang được theo dõi.
+
+        Returns:
+            float: Chiều cao đã được làm mịn (mét), hoặc None.
+        """
+        # 1. Tính toán chiều cao thô từ phép đo hiện tại
+        raw_height = self._calculate_raw_height(person_keypoints, distance_in_meters)
+        
+        if raw_height is None:
+            # Nếu không có chiều cao thô, không thể cập nhật bộ lọc.
+            # Trả về giá trị ước tính cuối cùng nếu có.
+            if track_id in self.kalman_filters:
+                return self.kalman_filters[track_id].current_estimate
+            return None
+
+        # 2. Lấy hoặc tạo bộ lọc Kalman cho track_id này
+        if track_id not in self.kalman_filters:
+            logger.info(f"Creating new Kalman Filter for track_id: {track_id}")
+            self.kalman_filters[track_id] = SimpleKalmanFilter(
+                process_variance=self.process_variance,
+                measurement_variance=self.measurement_variance,
+                initial_value=raw_height # Khởi tạo với giá trị đo đầu tiên
+            )
+        
+        kalman_filter = self.kalman_filters[track_id]
+        
+        # 3. Cập nhật bộ lọc với phép đo mới và nhận giá trị đã làm mịn
+        smoothed_height = kalman_filter.update(raw_height)
+        
+        logger.debug(
+            f"ID-{track_id}: Raw_H={raw_height:.2f}m -> Smoothed_H={smoothed_height:.2f}m"
+        )
+
+        return smoothed_height
+
+    def remove_tracker(self, track_id):
+        """
+        Xóa bộ lọc Kalman khi một đối tượng không còn được theo dõi.
+        Điều này quan trọng để tránh rò rỉ bộ nhớ.
+        """
+        if track_id in self.kalman_filters:
+            del self.kalman_filters[track_id]
+            logger.info(f"Removed Kalman Filter for track_id: {track_id}")

@@ -8,6 +8,7 @@ from PIL import Image
 import numpy as np
 from torchvision import transforms
 import cv2
+import time  # <<< THÊM IMPORT TIME >>>
 from utils.logging_python_orangepi import get_logger
 
 logger = get_logger(__name__)
@@ -74,8 +75,17 @@ class FeatureModel:
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225]),
         ])
+        
+        # <<< THÊM CÁC BIẾN ĐỂ ĐO FPS >>>
+        self.fps_call_count = 0
+        self.fps_total_time = 0.0
+        self.fps_avg = 0.0
+        # <<< KẾT THÚC THÊM BIẾN >>>
 
     def extract_feature(self, image: np.ndarray) -> np.ndarray:
+        # <<< BẮT ĐẦU ĐO THỜI GIAN >>>
+        start_time = time.perf_counter()
+        
         try:
             if not isinstance(image, np.ndarray):
                 raise TypeError(f"Expected np.ndarray, got {type(image)}")
@@ -95,6 +105,17 @@ class FeatureModel:
             norm = np.linalg.norm(feat)
             if norm > 0:
                 feat /= norm
+
+            # <<< KẾT THÚC ĐO THỜI GIAN VÀ TÍNH TOÁN FPS >>>
+            end_time = time.perf_counter()
+            self.fps_total_time += (end_time - start_time)
+            self.fps_call_count += 1
+            
+            # Tính và log FPS trung bình sau mỗi 20 lần gọi để tránh spam log
+            if self.fps_call_count > 0 and self.fps_call_count % 20 == 0:
+                self.fps_avg = self.fps_call_count / self.fps_total_time
+                logger.info(f"Average FPS for extract_feature (last {self.fps_call_count} calls): {self.fps_avg:.2f} FPS")
+            # <<< KẾT THÚC TÍNH TOÁN FPS >>>
 
             return feat
 

@@ -115,6 +115,16 @@ class StereoProjector:
 
         depth_roi = tof_depth_map[ty1:ty2, tx1:tx2]
         valid_depths = depth_roi[depth_roi > 0]
+
+        # # --- THÊM VÀO ĐỂ DEBUG ---
+        # if valid_depths.size > 0:
+        #     # In ra các giá trị duy nhất trong vùng ROI để xem chúng có bị lượng tử hóa không
+        #     unique_values = np.unique(valid_depths)
+        #     print(f"DEBUG: Unique depth values in ROI: {unique_values}") 
+            
+        #     # In ra một vài giá trị để xem
+        #     print(f"DEBUG: Sample depths: {valid_depths[:10]}")
+        # # --- KẾT THÚC DEBUG ---        
         
         # --- 4. Kiểm tra chất lượng của ROI ---
         if valid_depths.size < self.MIN_VALID_PIXELS:
