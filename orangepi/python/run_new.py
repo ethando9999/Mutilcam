@@ -1,159 +1,97 @@
-# file: python/run_new.py (Phiên bản đã sửa lỗi và tối ưu)
-
+# file: run_detect.py
 import argparse
 import asyncio
 import os
 import psutil
 
-# Import các module của dự án
+# Import các module ứng dụng
 from database.create_db import create_database
 from id.main_id_new import start_id, PersonReID
-import config
-
-# Thiết lập logging
 from utils.logging_python_orangepi import setup_logging, get_logger
+from core.processing import start_processor
+from core.put_frame_opi import start_putter
+from orangepi.python.config_x import DEVICE_ID_CONFIG_2 as ID_CONFIG 
+
 setup_logging()
 logger = get_logger(__name__)
 
-
-async def monitor_queue(queue: asyncio.Queue, queue_name: str):
-    """Log kích thước hàng đợi định kỳ."""
+async def monitor_queue(queue, name):
     while True:
-        try:
-            logger.info(f"Kích thước hàng đợi {queue_name}: {queue.qsize()}/{queue.maxsize}")
-            await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            break
+        logger.info(f"Hàng đợi {name}: {queue.qsize()}/{queue.maxsize}")
+        await asyncio.sleep(5)
 
 async def monitor_system():
-    """Log tải CPU & RAM định kỳ."""
     while True:
-        try:
-            cpu_percent = psutil.cpu_percent(interval=1)
-            memory = psutil.virtual_memory()
-            logger.info(f"Tải hệ thống - CPU: {cpu_percent:.1f}%, Bộ nhớ: {memory.percent:.1f}%")
-            await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            break
+        logger.info(f"Tải hệ thống - CPU: {psutil.cpu_percent():.1f}%, Mem: {psutil.virtual_memory().percent:.1f}%")
+        await asyncio.sleep(10)
 
 async def main(args):
-    """Điểm vào chính của ứng dụng."""
-    logger.info("Khởi động ứng dụng chính…")
+    logger.info("="*50)
+    logger.info("Khởi động ứng dụng Re-ID với luồng xử lý tối ưu...")
+    logger.info("="*50)
 
-    device_id = args.device_id
-    logger.info(f"Đang chạy ở chế độ device_id = {device_id}")
-
-    if "opi" in device_id:
-        from core.put_RGBD import start_putter
-        from core.processing_RGBD import start_processor
-        ID_CONFIG = config.OPI_CONFIG
-    elif "rpi" in device_id:
-        from core.put_frame import start_putter
-        from core.processing import start_processor
-        ID_CONFIG = config.RPI_CONFIG
-    else:
-        logger.error(f"device_id không hợp lệ: '{device_id}'. Phải chứa 'rpi' hoặc 'opi'.")
+    # Tách cấu hình cho Putter (phần cứng)
+    putter_config = {
+        "calib_file_path": ID_CONFIG.get("calib_file_path"),
+        "results_dir": ID_CONFIG.get("results_dir", "run_results/"),
+        "rgb_camera_index": ID_CONFIG.get("rgb_camera_index", 0),
+        "slave_ip": ID_CONFIG.get("slave_ip"),
+        "tcp_port": ID_CONFIG.get("tcp_port", 5005)
+    }
+    if not putter_config["calib_file_path"] or not putter_config["slave_ip"]:
+        logger.error("LỖI CẤU HÌNH: 'calib_file_path' hoặc 'slave_ip' chưa được thiết lập trong config.py!")
         return
+    logger.info(f"Chế độ: {args.device_id.upper()} | IP Slave: {putter_config['slave_ip']}")
 
-    # Quản lý cơ sở dữ liệu
+    # ======================== SỬA LỖI TẠI ĐÂY ========================
+    # Lọc ra các key không thuộc về PersonReID để tránh TypeError
+    hardware_keys_to_exclude = [
+        "calib_file_path", "slave_ip", "results_dir",
+        "rgb_camera_index", "tcp_port"
+    ]
+    person_reid_config = {
+        key: value for key, value in ID_CONFIG.items()
+        if key not in hardware_keys_to_exclude
+    }
+    # =================================================================
+
+    # Quản lý DB
     db_path = ID_CONFIG.get("db_path", "database.db")
-    if args.new_db:
-        logger.info(f"Cờ --new-db được bật. Đang tạo lại cơ sở dữ liệu tại '{db_path}'.")
-        for suffix in ["", "-shm", "-wal"]:
-            file_path = f"{db_path}{suffix}"
-            if os.path.exists(file_path):
-                os.remove(file_path)
+    if args.new_db and os.path.exists(db_path): os.remove(db_path)
+    if not os.path.exists(db_path):
         await create_database(db_path=db_path)
-    elif not os.path.exists(db_path):
-        logger.warning(f"Cơ sở dữ liệu không tìm thấy. Đang tạo mới tại: {db_path}")
-        await create_database(db_path=db_path)
-    else:
-        logger.info(f"Sử dụng cơ sở dữ liệu hiện có: {db_path}")
+        logger.info(f"Đã tạo DB mới: {db_path}")
 
-    # Khởi tạo các hàng đợi
-    frame_queue = asyncio.Queue(maxsize=100) # Giảm maxsize để tránh đầy bộ nhớ nếu xử lý chậm
-    processing_queue = asyncio.Queue(maxsize=200)
+    # Khởi tạo các thành phần với config đã được lọc
+    frame_queue = asyncio.Queue(maxsize=50)
+    processing_queue = asyncio.Queue(maxsize=1000)
+    person_reid = PersonReID(**person_reid_config) # <<< SỬ DỤNG CONFIG ĐÃ LỌC
 
-    person_reid = None
-    all_tasks = []
-    
+    tasks = []
     try:
-        # Khởi tạo PersonReID
-        reid_keys = [
-            "device_id", "db_path", "output_dir", "feature_threshold", "color_threshold",
-            "avg_threshold", "top_k", "thigh_weight", "torso_weight", "feature_weight",
-            "color_weight", "temp_timeout", "min_detections", "merge_threshold",
-            "face_threshold"
-        ]
-        reid_config = {key: ID_CONFIG[key] for key in reid_keys if key in ID_CONFIG}
-        person_reid = PersonReID(**reid_config)
-
-        # --- SỬA LỖI 1: TRUYỀN `camera_id` VÀO `start_putter` ---
-        if "opi" in device_id:
-            camera_id = ID_CONFIG.get("rgb_camera_id", 0) # Lấy ID camera từ config, mặc định là 0
-            all_tasks.append(asyncio.create_task(start_putter(frame_queue, camera_id=camera_id)))
-            
-            calib_path = ID_CONFIG.get("calib_file_path")
-            if not calib_path or not os.path.exists(calib_path):
-                raise FileNotFoundError(f"LỖI: File hiệu chỉnh không được tìm thấy tại '{calib_path}'.")
-            
-            processor_task = asyncio.create_task(
-                start_processor(frame_queue, processing_queue, calib_path)
-            )
-            all_tasks.append(processor_task)
-        else: # Chế độ RPi
-            # Giả định camera đầu tiên trong danh sách
-            camera_id = ID_CONFIG.get("camera_indices", [0])[0] 
-            all_tasks.append(asyncio.create_task(start_putter(frame_queue, camera_id=camera_id)))
-            processor_task = asyncio.create_task(start_processor(frame_queue, processing_queue))
-            all_tasks.append(processor_task)
-
-        # Khởi tạo các tác vụ còn lại
-        all_tasks.append(asyncio.create_task(start_id(processing_queue, person_reid)))
-        all_tasks.append(asyncio.create_task(monitor_queue(frame_queue, "Frame")))
-        all_tasks.append(asyncio.create_task(monitor_system()))
-        
-        if hasattr(person_reid, '_rabbit_task') and person_reid._rabbit_task:
-            all_tasks.append(person_reid._rabbit_task)
-
-        logger.info(f"Đã khởi tạo {len(all_tasks)} tác vụ. Bắt đầu vòng lặp chính.")
-        await asyncio.gather(*all_tasks)
-
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        logger.info("Phát hiện tín hiệu dừng. Đang tắt chương trình...")
-    except Exception as e:
-        logger.error(f"Lỗi không mong muốn ở cấp cao nhất: {e}", exc_info=True)
+        tasks.extend([
+            asyncio.create_task(start_putter(frame_queue, putter_config)),
+            asyncio.create_task(start_processor(frame_queue, processing_queue)),
+            asyncio.create_task(start_id(processing_queue, person_reid)),
+            asyncio.create_task(monitor_queue(frame_queue, "Frame")),
+            asyncio.create_task(monitor_system()),
+        ])
+        if hasattr(person_reid, '_rabbit_task'): tasks.append(person_reid._rabbit_task)
+        await asyncio.gather(*tasks)
+    except KeyboardInterrupt:
+        logger.info("Đang tắt chương trình...")
     finally:
-        logger.info("Bắt đầu quá trình dọn dẹp tài nguyên...")
-        
-        for task in all_tasks:
-            if not task.done():
-                task.cancel()
-        
-        # Chờ các task được hủy xong
-        await asyncio.gather(*all_tasks, return_exceptions=True)
-        
-        # --- SỬA LỖI 2: ĐÓNG RABBITMQ MỘT CÁCH AN TOÀN ---
-        if person_reid and hasattr(person_reid, 'rabbit') and person_reid.rabbit:
-            try:
-                logger.info("Đang đóng kết nối RabbitMQ...")
-                # Giả định lớp RabbitMQManager có một hàm stop() bất đồng bộ
-                await person_reid.rabbit.stop() 
-            except Exception as e:
-                logger.error(f"Lỗi khi đóng RabbitMQ: {e}")
-            
-        logger.info("Tất cả tài nguyên đã được dọn dẹp. Chương trình kết thúc.")
+        for task in tasks: task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if hasattr(person_reid, 'rabbit'): await person_reid.rabbit.stop()
+        logger.info("Chương trình kết thúc.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Chạy hệ thống ReID với quản lý cơ sở dữ liệu và cấu hình theo thiết bị."
-    )
-    parser.add_argument("--new-db", action="store_true", help="Xóa và tạo lại cơ sở dữ liệu.")
-    parser.add_argument("--device-id", type=str, required=True, help="ID của thiết bị (chứa 'rpi' hoặc 'opi').")
-    
+    parser = argparse.ArgumentParser(description="Chạy hệ thống Re-ID với giao tiếp Master-Slave.")
+    parser.add_argument("--new-db", action="store_true", help="Xóa và tạo lại DB.")
+    parser.add_argument("--device-id", default="opi", choices=["opi"], help="Chỉ hỗ trợ 'opi'.")
     args = parser.parse_args()
-
     try:
         asyncio.run(main(args))
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        logger.info("Chương trình đã dừng bởi người dùng.")
+    except KeyboardInterrupt:
+        pass

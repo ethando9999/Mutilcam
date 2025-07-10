@@ -13,7 +13,7 @@ except ImportError:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
 
-class StereoProjector:
+class StereoProjectorFinal:
     """
     Quản lý việc chiếu điểm và hộp giới hạn giữa camera RGB và ToF.
     Phiên bản này được tối ưu hóa về tốc độ và khả năng cấu hình.
@@ -163,3 +163,22 @@ class StereoProjector:
         tof_ymax = min(tof_h, int(np.max(tof_corners_projected[:, 1])))
 
         return (tof_xmin, tof_ymin, tof_xmax, tof_ymax)
+    
+        # ======================== BỔ SUNG HÀM NÀY ========================
+    def get_3d_point(self, rgb_box: tuple, tof_depth_map: np.ndarray) -> np.ndarray | None:
+        """
+        Lấy tọa độ 3D (X, Y, Z) của tâm bounding box trong hệ tọa độ camera RGB.
+        """
+        depth_z, status = self.get_robust_distance(rgb_box, tof_depth_map)
+        if status != "OK":
+            logger.warning(f"Không thể lấy điểm 3D do lỗi khoảng cách: {status}")
+            return None
+
+        xmin, ymin, xmax, ymax = rgb_box
+        center_x, center_y = (xmin + xmax) / 2., (ymin + ymax) / 2.
+        
+        # Unproject điểm tâm 2D về 3D
+        point_x_3d = (center_x - self.cx_rgb) * depth_z / self.fx_rgb
+        point_y_3d = (center_y - self.cy_rgb) * depth_z / self.fy_rgb
+
+        return np.array([point_x_3d, point_y_3d, depth_z])

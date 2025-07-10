@@ -85,7 +85,7 @@ async def create_database(
 
                 -- Trigger: tự động xóa vector khi person bị xóa
                 DROP TRIGGER IF EXISTS trg_delete_person_vec;
-                CREATE TRIGGER trg_delete_person_vec
+                CREATE TRIGGER trg_delete_person_vec 
                 AFTER DELETE ON Persons
                 FOR EACH ROW
                 BEGIN

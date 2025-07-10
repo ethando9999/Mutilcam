@@ -15,7 +15,7 @@ DEFAULT_OUTPUT_DIR = os.path.join(
     "results",
     "output_frames_id"
 )
-VEC0_PATH = "/usr/local/lib/vec0.so"
+VEC0_PATH = "/usr/local/lib/vec0.so" 
 RABBITMQ_URL = "amqp://new_user_rpi:123456@192.168.1.76:5672/"
 
 # --- CẤU HÌNH CHO Orange Pi (Stereo Vision) ---
@@ -28,13 +28,14 @@ OPI_CONFIG = {
     "slave_ip": "192.168.100.2",
     "tcp_port": 5005,
     "rgb_camera_id": 0,
-    "rgb_device_path": "/dev/rgb_cam",
+    # "rgb_device_path": "/dev/rgb_cam", 
     "rgb_resolution": (640, 480),
     "rgb_framerate": 15,
+    "bg_learning_time": 3,
 
     # --- Cấu hình cho Processor (processing_RGBD.py) ---
     "model_path": os.path.join(os.path.dirname(BASE_DIR), "models", "yolov8_pose.rknn"),
-    "calib_file_path": os.path.join(os.path.dirname(BASE_DIR), "python/track_local/data", "calib_v2.npz"), 
+    "calib_file_path": os.path.join(os.path.dirname(BASE_DIR), "python/track_local/data", "calib_v3.npz"), 
     "results_dir": os.path.join(os.path.dirname(BASE_DIR), "results"),
     "distance_threshold_m": 4.0, # Ngưỡng khoảng cách 4 mét
 

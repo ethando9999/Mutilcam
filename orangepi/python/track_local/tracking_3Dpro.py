@@ -1,199 +1,150 @@
+# file: python/tracking/track_3d_pro.py
+
 import numpy as np
-from collections import OrderedDict, deque
-import scipy.linalg
+from collections import OrderedDict
+
+# Import các lớp đã được tối ưu và bộ lọc 1D
+# Đảm bảo các đường dẫn import này là chính xác trong cấu trúc dự án của bạn
+from .unified_kalman_filter import UnifiedKalmanFilter, chi2inv95
+from core.stereo_projector_final import StereoProjectorFinal
+from utils.kalman_filter import SimpleKalmanFilter
 import logging
 
-# --- ĐỊNH NGHĨA LỚP KALMANFILTER3D ---
-
-chi2inv95 = {
-    1: 3.8415, 2: 5.9915, 3: 7.8147, 4: 9.4877, 5: 11.070,
-    6: 12.592, 7: 14.067, 8: 15.507, 9: 16.919
-}
-
-class KalmanFilter3D:
-    def __init__(self, dt: float = 1.0, process_noise_std: float = 1.0, measurement_noise_std: float = 1.0):
-        self.dt = dt
-        self._A = np.array([
-            [1, 0, 0, dt, 0, 0], [0, 1, 0, 0, dt, 0], [0, 0, 1, 0, 0, dt],
-            [0, 0, 0, 1, 0, 0], [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 1]
-        ])
-        self._H = np.array([
-            [1, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0]
-        ])
-        q = process_noise_std ** 2
-        self._Q = np.eye(6) * q
-        r = measurement_noise_std ** 2
-        self._R = np.eye(3) * r
-
-    def initiate(self, measurement: np.ndarray):
-        mean = np.zeros((6, 1))
-        mean[:3] = np.array(measurement).reshape((3, 1))
-        std = np.array([self._R[0, 0]**0.5, self._R[1, 1]**0.5, self._R[2, 2]**0.5, 10., 10., 10.])
-        covariance = np.diag(std**2)
-        return mean, covariance
-
-    def _predict_stateless(self, mean: np.ndarray, covariance: np.ndarray):
-        mean = self._A @ mean
-        covariance = self._A @ covariance @ self._A.T + self._Q
-        return mean, covariance
-
-    def _update_stateless(self, mean: np.ndarray, covariance: np.ndarray, measurement: np.ndarray):
-        projected_mean, projected_cov = self.project(mean, covariance)
-        measurement = np.array(measurement).reshape((3, 1))
-        kalman_gain = scipy.linalg.cho_solve(
-            (scipy.linalg.cho_factor(projected_cov, lower=True, check_finite=False)),
-            (covariance @ self._H.T).T, check_finite=False).T
-        innovation = measurement - projected_mean
-        new_mean = mean + kalman_gain @ innovation
-        new_covariance = covariance - kalman_gain @ projected_cov @ kalman_gain.T
-        return new_mean, new_covariance
-
-    def project(self, mean: np.ndarray, covariance: np.ndarray):
-        projected_mean = self._H @ mean
-        projected_cov = self._H @ covariance @ self._H.T + self._R
-        return projected_mean, projected_cov
-
-    def gating_distance(self, mean: np.ndarray, covariance: np.ndarray, measurements: np.ndarray):
-        projected_mean, projected_cov = self.project(mean, covariance)
-        measurements = np.atleast_2d(measurements)
-        d = measurements - projected_mean.flatten()
-        try:
-            cholesky_factor = np.linalg.cholesky(projected_cov)
-            z = scipy.linalg.solve_triangular(cholesky_factor, d.T, lower=True, check_finite=False, overwrite_b=True)
-            squared_maha = np.sum(z * z, axis=0)
-        except np.linalg.LinAlgError:
-            squared_maha = np.array([np.inf] * measurements.shape[0])
-        return squared_maha
-
-# --- ĐỊNH NGHĨA LỚP TRACKINGMANAGER3D ---
-
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
-class TrackingManager3D:
-    def __init__(self, dt: float = 1.0, process_noise_std: float = 0.1, measurement_noise_std: float = 0.5,
-                 gating_threshold: float = chi2inv95[3], max_time_lost: int = 30,
-                 appearance_thresh: float = 0.5, feature_history_len: int = 10):
-        self.kf = KalmanFilter3D(dt, process_noise_std, measurement_noise_std)
+class Track3DPro:
+    # ... (Toàn bộ nội dung của lớp Track3DPro giữ nguyên không đổi) ...
+    """
+    Quản lý việc theo dõi đa đối tượng bằng cách sử dụng bộ lọc Kalman hợp nhất
+    và phép chiếu stereo mạnh mẽ.
+    Tích hợp bộ lọc 1D để làm mịn giá trị chiều cao cho mỗi track.
+    """
+    def __init__(self, calib_file_path: str, max_time_lost: int = 30):
+        # Giả định StereoProjector được khởi tạo đúng cách
+        # Nếu StereoProjector của bạn có các tham số khác, hãy cập nhật ở đây
+        self.stereo_projector = StereoProjectorFinal(calib_file_path=calib_file_path)
+        self.kf = UnifiedKalmanFilter()
+        
         self.tracks = OrderedDict()
-        self.gating_threshold = gating_threshold
+        self.next_track_id = 0
         self.max_time_lost = max_time_lost
-        self.appearance_thresh = appearance_thresh
-        self.feature_history_len = feature_history_len
-        self._next_id = 1
+        self.gating_thresh = chi2inv95[5]  # Ngưỡng cho không gian đo lường 5D
+
+    @staticmethod
+    def bbox_to_xywh(bbox: list | np.ndarray) -> np.ndarray:
+        """Chuyển đổi [x1, y1, x2, y2] sang [cx, cy, w, h]."""
+        x1, y1, x2, y2 = bbox
+        w, h = x2 - x1, y2 - y1
+        return np.array([x1 + w / 2., y1 + h / 2., w, h])
+
+    def _get_measurement(self, detection: dict) -> np.ndarray | None:
+        """Từ một detection, tạo ra một phép đo 5D [cx, cy, w, h, z]."""
+        bbox = detection.get('bbox')
+        tof_depth_map = detection.get('tof_depth_map')
+        if bbox is None or tof_depth_map is None:
+            return None
+
+        # Sử dụng get_robust_distance trả về tuple (distance, status)
+        depth, status = self.stereo_projector.get_robust_distance(bbox, tof_depth_map)
+        if status != "OK" or depth is None:
+            return None
+        
+        xywh = self.bbox_to_xywh(bbox)
+        return np.array([xywh[0], xywh[1], xywh[2], xywh[3], depth])
 
     def predict_all(self):
+        """Dự đoán trạng thái tiếp theo cho tất cả các track."""
         for tr in self.tracks.values():
-            tr['mean'], tr['covariance'] = self.kf._predict_stateless(tr['mean'], tr['covariance'])
+            tr['mean'], tr['covariance'] = self.kf.predict(tr['mean'], tr['covariance'])
             tr['time_since_update'] += 1
 
-    def _remove_stale_tracks(self):
-        to_remove = [pid for pid, tr in self.tracks.items() if tr['time_since_update'] > self.max_time_lost]
-        for pid in to_remove:
-            logger.info(f"Xóa track ID {pid} do đã mất tích quá lâu (time_since_update={self.tracks[pid]['time_since_update']}).")
-            del self.tracks[pid]
-
-    def update(self, detections):
-        # 1. Dự đoán tất cả các track hiện có
+    def match(self, detections: list[dict]) -> tuple[list, list]:
+        """Thực hiện việc ghép cặp giữa các track và các detection mới."""
         self.predict_all()
+        
+        valid_detections_map = {i: self._get_measurement(det) for i, det in enumerate(detections)}
+        valid_measurements = [m for m in valid_detections_map.values() if m is not None]
 
-        # [FIXED] Xử lý trường hợp không có detection
-        if not detections:
-            self._remove_stale_tracks()
-            return
+        if not self.tracks or not valid_measurements:
+            unmatched_detections = list(range(len(detections)))
+            return [], unmatched_detections
 
-        # 2. Xây dựng ma trận chi phí (cost matrix)
-        num_tracks = len(self.tracks)
-        num_dets = len(detections)
-        cost_matrix = np.full((num_tracks, num_dets), np.inf)
-        track_pids = list(self.tracks.keys())
-
-        if num_tracks > 0:
-            for i, pid in enumerate(track_pids):
-                tr = self.tracks[pid]
-                det_points = np.array([d['point'] for d in detections])
-                distances = self.kf.gating_distance(tr['mean'], tr['covariance'], det_points)
-                
-                for j, dist in enumerate(distances):
-                    if dist > self.gating_threshold:
-                        continue
-                    
-                    cost = dist
-                    if 'feature' in detections[j] and tr['feature_history']:
-                        feat_avg = np.mean(np.stack(tr['feature_history']), axis=0)
-                        sim = np.dot(feat_avg, detections[j]['feature'])
-                        if sim < self.appearance_thresh:
-                            continue
-                        cost = 1.0 - sim
-                    
-                    cost_matrix[i, j] = cost
-
-        # 3. Gán cặp (matching)
-        from scipy.optimize import linear_sum_assignment
-        track_indices, det_indices = linear_sum_assignment(cost_matrix)
+        cost_matrix = np.full((len(self.tracks), len(valid_measurements)), np.inf)
+        track_ids = list(self.tracks.keys())
+        measurement_indices = [i for i, m in valid_detections_map.items() if m is not None]
+        
+        for i, track_id in enumerate(track_ids):
+            track = self.tracks[track_id]
+            distances = self.kf.gating_distance(track['mean'], track['covariance'], np.array(valid_measurements))
+            cost_matrix[i, :] = distances
 
         matches = []
-        for ti, di in zip(track_indices, det_indices):
-            if cost_matrix[ti, di] != np.inf:
-                matches.append((track_pids[ti], di))
-
-        # 4. Cập nhật các track đã khớp
-        matched_pids = {m[0] for m in matches}
-        matched_dets_indices = {m[1] for m in matches}
-
-        for pid, di in matches:
-            tr = self.tracks[pid]
-            det = detections[di]
-            tr['mean'], tr['covariance'] = self.kf._update_stateless(tr['mean'], tr['covariance'], det['point'])
-            if 'feature' in det:
-                tr['feature_history'].append(det['feature'])
-            tr['time_since_update'] = 0
-
-        # 5. Tạo track mới cho các detection không khớp
-        unmatched_dets_indices = set(range(num_dets)) - matched_dets_indices
-        for di in unmatched_dets_indices:
-            det = detections[di]
-            mean, cov = self.kf.initiate(det['point'])
-            hist = deque(maxlen=self.feature_history_len)
-            if 'feature' in det:
-                hist.append(det['feature'])
+        used_detections = set()
+        row_ind, col_ind = np.unravel_index(np.argsort(cost_matrix, axis=None), cost_matrix.shape)
+        
+        for r, c in zip(row_ind, col_ind):
+            if cost_matrix[r, c] > self.gating_thresh:
+                break
             
-            self.tracks[self._next_id] = {
-                'mean': mean, 'covariance': cov, 'time_since_update': 0, 'feature_history': hist
-            }
-            logger.info(f"Tạo track mới ID {self._next_id} từ detection tại {det['point']}.")
-            self._next_id += 1
-
-        # 6. Xóa các track cũ
-        self._remove_stale_tracks()
-
-# --- VÍ DỤ SỬ DỤNG ĐÃ SỬA LỖI ---
-if __name__ == '__main__':
-    manager = TrackingManager3D(max_time_lost=5, appearance_thresh=0.8)
-    
-    print("--- FRAME 0 ---")
-    initial_detections = [{'point': np.array([10, 10, 10]), 'feature': np.array([0.9, 0.1]) / np.linalg.norm([0.9, 0.1])}]
-    manager.update(initial_detections)
-    print(f"Các track đang hoạt động: {list(manager.tracks.keys())}")
-    print(f"Vị trí ước tính của Track 1: {np.round(manager.tracks[1]['mean'][:3].flatten(), 2)}")
-
-    print("\n--- FRAME 1 ---")
-    detections_f1 = [
-        {'point': np.array([10.2, 10.3, 10.1]), 'feature': np.array([0.9, 0.1]) / np.linalg.norm([0.9, 0.1])},
-        {'point': np.array([50, 50, 50]),       'feature': np.array([0.1, 0.9]) / np.linalg.norm([0.1, 0.9])},
-    ]
-    manager.update(detections_f1)
-    print(f"Các track đang hoạt động: {list(manager.tracks.keys())}")
-    print(f"Vị trí ước tính của Track 1: {np.round(manager.tracks[1]['mean'][:3].flatten(), 2)}")
-    print(f"Vị trí ước tính của Track 2: {np.round(manager.tracks[2]['mean'][:3].flatten(), 2)}")
-
-    for i in range(2, 8):
-        print(f"\n--- FRAME {i} ---")
-        manager.update([])
-        print(f"Các track đang hoạt động: {list(manager.tracks.keys())}")
-        if 1 in manager.tracks:
-            print(f"  -> Track 1 time_since_update: {manager.tracks[1]['time_since_update']}")
-        if 2 in manager.tracks:
-            print(f"  -> Track 2 time_since_update: {manager.tracks[2]['time_since_update']}")
+            track_id = track_ids[r]
+            detection_idx = measurement_indices[c]
             
-    print("\nHoàn thành ví dụ.")
+            if track_id not in [m[0] for m in matches] and detection_idx not in used_detections:
+                matches.append((track_id, detection_idx))
+                used_detections.add(detection_idx)
+
+        unmatched_tracks = set(self.tracks.keys()) - {m[0] for m in matches}
+        unmatched_detections = set(range(len(detections))) - used_detections
+        
+        for track_id, det_idx in matches:
+            measurement = valid_detections_map[det_idx]
+            self.update_main_state(track_id, measurement)
+        
+        self._remove_stale_tracks(unmatched_tracks)
+        
+        return matches, list(unmatched_detections)
+
+    def update_main_state(self, track_id: int, measurement: np.ndarray):
+        """Cập nhật trạng thái Kalman hợp nhất (vị trí 2D & 3D)."""
+        track = self.tracks[track_id]
+        track['mean'], track['covariance'] = self.kf.update(track['mean'], track['covariance'], measurement)
+        track['time_since_update'] = 0
+
+    def register_new_track(self, detection: dict) -> int | None:
+        """Đăng ký một track mới và khởi tạo bộ lọc chiều cao cho nó."""
+        measurement = self._get_measurement(detection)
+        if measurement is None:
+            return None
+
+        mean, covariance = self.kf.initiate(measurement)
+        new_track_id = self.next_track_id
+        
+        self.tracks[new_track_id] = {
+            'mean': mean, 'covariance': covariance, 'time_since_update': 0,
+            'height_smoother': SimpleKalmanFilter(process_variance=1e-3, measurement_variance=2e-2),
+            'last_smoothed_height': None
+        }
+        logger.info(f"✨ Đã đăng ký track mới ID: {new_track_id}")
+        self.next_track_id += 1
+        return new_track_id
+
+    def update_height(self, track_id: int, raw_height: float) -> float | None:
+        """Cập nhật chiều cao cho một track bằng bộ lọc 1D."""
+        track = self.tracks.get(track_id)
+        if track is None:
+            logger.warning(f"Không tìm thấy track ID {track_id} để cập nhật chiều cao.")
+            return None
+        
+        smoother = track['height_smoother']
+        smoothed_height = smoother.update(raw_height)
+        track['last_smoothed_height'] = smoothed_height
+        
+        return smoothed_height
+
+    def _remove_stale_tracks(self, unmatched_track_ids: set):
+        """Xóa các track đã mất dấu quá lâu."""
+        to_remove = [tid for tid in unmatched_track_ids if self.tracks[tid]['time_since_update'] > self.max_time_lost]
+        for tid in to_remove:
+            logger.info(f"🗑️ Xóa track đã mất dấu ID: {tid}")
+            if tid in self.tracks:
+                del self.tracks[tid]
