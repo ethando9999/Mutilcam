@@ -10,11 +10,10 @@ import shutil
 import subprocess
 from collections import Counter, defaultdict
 
-from feature.feature_osnet import FeatureModel
+from feature.feature_osnet import FeatureModel 
 from .reid_manager_bank import ReIDManager
 from face_processing.face_v2.face_analyze import FaceAnalyze
 from rabbitMQ.rabbitMQ_manager import RabbitMQManager
-
 
 from utils.logging_python_orangepi import get_logger 
 logger = get_logger(__name__)
@@ -27,9 +26,9 @@ class PersonReID:
         color_threshold=0.5,
         avg_threshold=0.8,
         top_k=3,
-        thigh_weight=4,
+        thigh_weight=4, 
         torso_weight=4,
-        feature_weight: float = 0.5,
+        feature_weight: float = 0.5, 
         color_weight: float = 0.5,
         db_path="database.db",
         device_id=None,
@@ -105,13 +104,12 @@ class PersonReID:
         """Asynchronously process face data."""
         start_time = time.time()
         result = await self.face_analyze.analyze(head_box)
-        logger.debug(f"Face processing took {time.time() - start_time:.2f} seconds")
         return result
 
     async def save_crop_async(self, crop_path, human_box):
         """Asynchronously save cropped image as JPEG."""
         start_time = time.time()
-        await asyncio.to_thread(cv2.imwrite, crop_path, human_box, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        await asyncio.to_thread(cv2.imwrite, crop_path, human_box, [cv2.IMWRITE_JPEG_QUALITY, 100])
         logger.debug(f"Saving crop took {time.time() - start_time:.2f} seconds")
 
     async def _handle_remote_request(self, data: dict) -> str | None:
@@ -240,13 +238,15 @@ class PersonReID:
         gender: str | None,
         race: str | None,
         age: str | None,
-        body_color: np.ndarray | list | None, 
+        body_color: np.ndarray | list | None,
         feature_person: np.ndarray | list,
         face_embedding: np.ndarray | list | None,
+        map_keypoints: list[tuple[float, float]],
     ):
         """
         Update temp_id counter, reset timeout, try nearest-feature matching;
-        if below threshold and min_detections reached, publish remote lookup, else reschedule timeout.
+        if below threshold and has enough valid keypoints, publish remote lookup,
+        else reschedule timeout.
         """
         # 1) Increment count
         self.temp_update_counts[temp_id] += 1
@@ -262,8 +262,8 @@ class PersonReID:
         if replaced:
             return
 
-        # 4) If enough detections, publish remote and replace
-        if count >= self.min_detections:
+        # 4) If has enough valid keypoints, publish remote and replace
+        if has_enough_valid_keypoints(map_keypoints):
             await self._publish_and_replace_temp_id(
                 temp_id, gender, race, age, body_color, feature_person, face_embedding
             )
@@ -327,14 +327,19 @@ class PersonReID:
         face_embedding,
         bbox,
         frame_id,
+        map_keypoints,  
     ) -> str:
         """
         Gán person_id (existing hoặc provisional). Nếu temp_id, chỉ gởi remote lookup khi đã update >=3 lần,
         và nếu sau temp_timeout giây không có update nào nữa → xóa temp_id.
         """
-        gender = gender_result[0] if gender_result else None
-        race = race_result[0] if race_result else None
-        age = age_result[0] if age_result else None
+        # gender = gender_result[0] if gender_result else None
+        # race = race_result[0] if race_result else None
+        # age = age_result[0] if age_result else None
+
+        gender = gender_result 
+        race = race_result 
+        age = age_result
 
         logger.debug(f"Begin process_id: gender={gender}, race={race}, age={age}")
 
@@ -363,7 +368,8 @@ class PersonReID:
                         age=age,
                         body_color=body_color,
                         feature_person=feature_person,
-                        face_embedding=face_embedding
+                        face_embedding=face_embedding,
+                        map_keypoints=map_keypoints,
                     ),
                     self.reid_manager.update_person(
                         local_id,
@@ -417,37 +423,43 @@ class PersonReID:
         await self.rabbit.stop()
         await self.reid_manager.close()
 
-    async def analyze(self, frame_data: dict, max_retries=3):
-        """Process a frame with person detection and ReID asynchronously."""
-        if not isinstance(frame_data, dict):
-            logger.error(f"frame_data must be a dict, got {type(frame_data)}")
+    async def analyze(self, data: dict, max_retries=3):
+        """Xử lý một frame với phát hiện người và ReID một cách bất đồng bộ."""
+        if not isinstance(data, dict):
+            logger.error(f"data must be a dict, got {type(data)}")
             return None
 
         for attempt in range(1, max_retries + 1):
             try:
                 start_time = time.time()
 
-                frame_id = frame_data.get("frame_id")
-                human_image = frame_data.get("human_box")
-                body_color = frame_data.get("body_color")
-                body_parts = frame_data.get("body_parts", {})
-                bbox = frame_data.get("bbox")
-                map_keypoints = frame_data.get("map_keypoints", {})
+                # Lấy dữ liệu khớp với output của process_frame_queue
+                frame_id = data.get("frame_id")
+                human_image = data.get("human_box")
+                body_parts = data.get("body_parts", {})
+                bbox = data.get("bbox")
+                map_keypoints = data.get("map_keypoints")
+                
+                # ### <<< SỬA LỖI 1: Lấy `body_color` từ dữ liệu đầu vào
+                body_color = data.get("body_color") # Thêm dòng này
 
-                if human_image is None:
-                    logger.error("Missing human_box in frame_data")
+                # Lấy các thông tin bổ sung
+                camera_id = data.get("camera_id", "unknown_cam")
+                distance_mm = data.get("distance_mm")
+                est_height_m = data.get("est_height_m")
+                head_point_3d = data.get("head_point_3d")
+
+                if human_image is None or human_image.size == 0:
+                    logger.error(f"Missing or empty human_box in data for frame_id {frame_id}")
                     return None
 
                 # Tạo task feature person
-                # Giả sử extract_feature_async hoặc extract_feature (sync)
                 if hasattr(self, "extract_feature_async"):
-                    # Kiểm tra coroutine function
                     if asyncio.iscoroutinefunction(self.extract_feature_async):
                         task_feat = self.extract_feature_async(human_image)
                     else:
                         task_feat = asyncio.to_thread(self.extract_feature_async, human_image)
                 else:
-                    # Ví dụ có extract_feature sync
                     task_feat = asyncio.to_thread(self.extract_feature, human_image)
                 tasks = [task_feat]
 
@@ -458,7 +470,6 @@ class PersonReID:
                     if x2 > x1 and y2 > y1:
                         head_crop = human_image[y1:y2, x1:x2]
                         if getattr(head_crop, "size", 0) > 0:
-                            # face_processing có thể async hoặc sync
                             if hasattr(self, "face_processing"):
                                 if asyncio.iscoroutinefunction(self.face_processing):
                                     tasks.append(self.face_processing(head_crop))
@@ -478,62 +489,63 @@ class PersonReID:
                     raise feature_person
 
                 face_results = results[1] if len(results) > 1 else None
-                # face_results có thể tuple hoặc dict tuỳ implement; giả sử tuple
                 if face_results:
                     try:
                         face_embedding, age_result, gender_result, emotion_result, race_result = face_results
                     except Exception:
-                        # nếu face_results không đúng định dạng
                         face_embedding = age_result = gender_result = emotion_result = race_result = None
                 else:
                     face_embedding = age_result = gender_result = emotion_result = race_result = None
 
-                # Gọi process_id, giả sử là async
+                # ### <<< SỬA LỖI 2: Truyền `body_color` vào hàm `process_id`
+                # Đảm bảo thứ tự các tham số khớp với định nghĩa của process_id
                 if asyncio.iscoroutinefunction(self.process_id):
                     final_id = await self.process_id(
-                        gender_result, race_result, age_result, body_color, feature_person, face_embedding, bbox, frame_id
+                        gender_result, race_result, age_result, body_color, feature_person, face_embedding, bbox, frame_id, map_keypoints
                     )
                 else:
                     final_id = await asyncio.to_thread(
-                        self.process_id, gender_result, race_result, age_result, body_color, feature_person, face_embedding, bbox, frame_id
+                        self.process_id, gender_result, race_result, age_result, body_color, feature_person, face_embedding, bbox, frame_id, map_keypoints
                     )
+                # ### <<< KẾT THÚC SỬA LỖI
 
                 # Tạo thư mục và lưu ảnh crop
                 id_folder = os.path.join(self.OUTPUT_DIR, f"id_{final_id}")
                 await asyncio.to_thread(os.makedirs, id_folder, exist_ok=True)
 
-                # Lấy frame_index dưới lock để tránh trùng
                 async with self.index_lock:
                     current_index = self.frame_index
                     self.frame_index += 1
 
                 crop_filename = f"frame_{current_index}.jpg"
                 crop_path = os.path.join(id_folder, crop_filename)
-                # save_crop_async có thể async hoặc sync
                 if hasattr(self, "save_crop_async") and asyncio.iscoroutinefunction(self.save_crop_async):
                     await self.save_crop_async(crop_path, human_image)
                 else:
                     await asyncio.to_thread(self.save_crop, crop_path, human_image)
 
-                # Cập nhật thống kê ID
                 async with self.statistics_lock:
                     self.total_id_statistics.setdefault(final_id, 0)
                     self.total_id_statistics[final_id] += 1
 
-                # Có thể thêm hành động định kỳ khi đạt update_interval
                 current_time = time.time()
                 if current_time - self.last_check_time >= self.update_interval:
-                    # Ví dụ: log hoặc flush stats
                     logger.info("Đã qua update_interval, có thể xử lý thống kê định kỳ ở đây")
                     self.last_check_time = current_time
 
-                # Cập nhật FPS trong lock chung
                 duration = current_time - start_time
                 fps_current = 1 / duration if duration > 0 else 0.0
                 async with self.stats_lock:
                     self.fps_avg = (self.fps_avg * self.call_count + fps_current) / (self.call_count + 1)
                     self.call_count += 1
-                    logger.info(f"Processed frame {current_index}: FPS_ID = {self.fps_avg:.2f}")
+                    
+                dist_str = f"{distance_mm/1000:.2f}m" if distance_mm is not None else "N/A"
+                height_str = f"{est_height_m:.2f}m" if est_height_m is not None else "N/A"
+                
+                logger.info(
+                    f"Processed frame {current_index} for ID_{final_id} from Cam_{camera_id}. "
+                    f"Dist: {dist_str}, Height: {height_str}. FPS_ID = {self.fps_avg:.2f}"
+                )
 
                 return final_id
 
@@ -547,7 +559,11 @@ class PersonReID:
                     continue
                 else:
                     logger.error(f"Failed after {max_retries} attempts.")
-                    return None
+                    return None 
+
+def has_enough_valid_keypoints(keypoints, min_valid_keypoints=14):
+    valid_count = sum(1 for x, y in keypoints if x != 0 and y != 0)
+    return valid_count >= min_valid_keypoints
 
 async def start_id(processing_queue: asyncio.Queue, person_reid: PersonReID = None):
     """Asynchronous function to process frames từ processing_queue."""
@@ -571,18 +587,18 @@ async def start_id(processing_queue: asyncio.Queue, person_reid: PersonReID = No
     try:
         while True:
             try:
-                frame_data = await processing_queue.get()
+                data = await processing_queue.get()
             except asyncio.CancelledError:
                 logger.info("start_id nhận CancelledError khi get queue")
                 raise
 
-            if frame_data is None:
+            if data is None:
                 processing_queue.task_done()
                 logger.info("Received sentinel None, kết thúc start_id")
                 break
 
             try:
-                final_id = await person_reid.analyze(frame_data)
+                final_id = await person_reid.analyze(data)
                 # Xử lý final_id nếu cần
             except asyncio.CancelledError:
                 logger.info("start_id: analyze bị hủy")

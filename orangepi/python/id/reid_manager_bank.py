@@ -96,15 +96,11 @@ class ReIDManager:
 
     async def _init_database(self):
         async with self.db_lock: 
-            # # 1) Tạo schema (bằng script bên ngoài)
-            # from database.create_db import initialize_db
-            # self.use_vec = await initialize_db(self.db_path, self.vec_ext)
-
             # 2) Mở kết nối
             db = await aiosqlite.connect(self.db_path)
             await db.execute("PRAGMA foreign_keys = ON;")
             await db.enable_load_extension(True)
-            await db.load_extension(self.vec_ext)
+            await db.load_extension(self.vec_ext) 
             # await db.load_extension(sqlite_vec.loadable_path())
 
             # 3) Bản ghi mặc định cho Cameras & Frames
@@ -116,7 +112,7 @@ class ReIDManager:
 
             ts = asyncio.get_event_loop().time()
             await db.execute(
-                "INSERT OR IGNORE INTO Frames(frame_id, timestamp, camera_id) "
+                "INSERT OR IGNORE INTO Frames(frame_id, timestamp, camera_id) " 
                 "VALUES('frame0', ?, 'edge');",
                 (ts,)
             )

@@ -1,0 +1,26 @@
+(ven) (base) tris@tris-Device:~/Desktop/id_rknn/campc/orangepi/depth_processing$ python3 calibrate.py
+2025-06-30 12:01:01 - INFO - [logging_config:25] - ==================================================
+2025-06-30 12:01:01 - INFO - [logging_config:26] - Logging system initialized
+2025-06-30 12:01:01 - INFO - [logging_config:27] - ==================================================
+2025-06-30 12:01:01 - INFO - [calibrate:45] - ==================================================
+2025-06-30 12:01:01 - INFO - [calibrate:46] - Starting Stereo Calibration Process (v5.2 - Detailed Logging)
+2025-06-30 12:01:01 - INFO - [calibrate:47] - ==================================================
+2025-06-30 12:01:01 - INFO - [calibrate:50] - Attempting to load ToF intrinsics from '/home/tris/Desktop/id_rknn/campc/orangepi/depth_processing/tof_intrinsics.npz'...
+2025-06-30 12:01:01 - INFO - [calibrate:56] - Successfully loaded ToF camera factory intrinsics.
+2025-06-30 12:01:01 - INFO - [calibrate:66] - Found 15 RGB images. Processing all.
+2025-06-30 12:01:02 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 001
+2025-06-30 12:01:02 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 002
+2025-06-30 12:01:02 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 003
+2025-06-30 12:01:02 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on RGB image and ToF amplitude image for ID: 004
+2025-06-30 12:01:03 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on RGB image and ToF amplitude image for ID: 005
+2025-06-30 12:01:03 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 006
+2025-06-30 12:01:03 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 007
+2025-06-30 12:01:04 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on RGB image and ToF amplitude image for ID: 008
+2025-06-30 12:01:04 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 009
+2025-06-30 12:01:04 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 010
+2025-06-30 12:01:04 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 011
+2025-06-30 12:01:05 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 012
+2025-06-30 12:01:05 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on RGB image and ToF amplitude image for ID: 013
+2025-06-30 12:01:05 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 014
+2025-06-30 12:01:05 - WARNING - [calibrate:113] -   -> Fail: Could not find chessboard on ToF amplitude image for ID: 015
+2025-06-30 12:01:05 - ERROR - [calibrate:120] - Insufficient valid image pairs (0 found). Need at least 10 for a reliable calibration. Aborting.

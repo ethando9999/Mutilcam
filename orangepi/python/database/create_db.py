@@ -62,7 +62,7 @@ async def create_database(
                 CREATE VIRTUAL TABLE PersonsVec USING vec0 (
                     person_id        TEXT PRIMARY KEY,
                     feature_mean     float[{FEATURE_DIMENSIONS}] DISTANCE cosine,
-                    body_color_mean  float[51]  DISTANCE cosine
+                    -- body_color_mean  float[51]  DISTANCE cosine
                 );
 
                 DROP TABLE IF EXISTS FaceVector;
@@ -89,7 +89,7 @@ async def create_database(
                     age          TEXT,
                     gender       TEXT,
                     race         TEXT,
-                    height_mean  REAL,
+                    height_mean  TEXT,
                     FOREIGN KEY (person_id) REFERENCES Persons(person_id)
                         ON DELETE CASCADE
                 );
