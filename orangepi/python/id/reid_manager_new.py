@@ -83,8 +83,8 @@ class ReIDManager:
 
         self.tracking_manager = TrackingManager()
 
-        self.hard_face_threshold = 0.85
-        self.hard_feature_threshold = 0.8
+        self.hard_face_threshold = 0.8
+        self.hard_feature_threshold = 0.7
 
         # asyncio.create_task(self.setup_rabbitmq(rabbitmq_url))
         logger.info("ReIDManager init successful")
