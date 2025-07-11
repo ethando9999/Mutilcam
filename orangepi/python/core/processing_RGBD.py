@@ -79,6 +79,10 @@ class FrameProcessor:
             return False
         return True
 
+    async def _run_in_executor(self, func, *args):
+        """Hàm helper để chạy các hàm blocking trong luồng riêng."""
+        return await asyncio.to_thread(func, *args)
+
     async def save_debug_images(self, base_name, rgb_frame, tof_depth_frame, rgb_box, tof_box):
         """Lưu các ảnh gỡ lỗi một cách bất đồng bộ để không làm chậm luồng chính."""
         try:
@@ -116,7 +120,6 @@ class FrameProcessor:
 
         except Exception:
             logger.exception("Lỗi khi lưu ảnh debug")
-
 
     # --------------------------------------------------------------------
     # HÀM XỬ LÝ CHÍNH (CORE PROCESSING)
