@@ -38,7 +38,11 @@ def compute_head_bbox(person_keypoints, scale=1, adjust_ratio=0.35):
         tuple: (x_min, y_min, x_max, y_max) nếu hợp lệ, None nếu không có keypoints.
     """
     # Lọc bỏ các keypoints có tọa độ (0, 0)
-    keypoints = np.array([kp for kp in person_keypoints if not (kp[0] == 0 and kp[1] == 0)])
+    keypoints = np.array([
+        kp for kp in person_keypoints 
+        if not (kp[0] == 0 and kp[1] == 0) and not (np.isnan(kp[0]) or np.isnan(kp[1]))
+    ])
+
 
     if keypoints.shape[0] == 0:  # Không có keypoint hợp lệ
         return None
@@ -121,7 +125,7 @@ def compute_arm_region(frame, start_point, end_point, thickness=100):
     
     # Tính new_thickness theo tỷ lệ giữa chiều cao frame và độ dài đường thẳng
     frame_height = frame.shape[0]
-    new_thickness = int(thickness * (frame_height / line_length))
+    new_thickness = max(1, int(thickness * (frame_height / (line_length + 1e-6))))
     
     # Tạo một mask để vẽ đường thẳng
     mask = np.zeros(frame.shape[:2], dtype=np.uint8)

@@ -9,9 +9,8 @@ from database.create_db import create_database
 from id.main_id_new import start_id, PersonReID
 
 ### <<< THAY ĐỔI 1: IMPORT CÁC THÀNH PHẦN CẦN THIẾT >>> ###
-from socket_manager.id_socket import start_id_sender
+from socket_manager.socket_sender import start_socket_sender
 # Import cả queue để có thể giám sát nó
-from config import ID_URL
 ### <<< KẾT THÚC THAY ĐỔI 1 >>> ###
 
 from utils.logging_python_orangepi import setup_logging, get_logger
@@ -87,6 +86,9 @@ async def main(args):
     frame_queue = asyncio.Queue(maxsize=100)
     processing_queue = asyncio.Queue(maxsize=1000)
     id_socket_queue = asyncio.Queue()
+    people_count_queue = asyncio.Queue()
+    height_queue = asyncio.Queue()
+
 
     # --- CẬP NHẬT PHẦN KHỞI TẠO PersonReID ---
     # Định nghĩa các khóa hợp lệ mà PersonReID.__init__ chấp nhận để tránh TypeError
@@ -118,12 +120,13 @@ async def main(args):
     try:
         person_reid_instance = person_reid
         all_tasks.append(asyncio.create_task(start_putter(frame_queue, camera_id)))
-        all_tasks.append(asyncio.create_task(start_processor(frame_queue, processing_queue)))
+        all_tasks.append(asyncio.create_task(start_processor(frame_queue, processing_queue, people_count_queue, height_queue)))
         all_tasks.append(asyncio.create_task(start_id(processing_queue, person_reid_instance)))
 
         ### <<< THAY ĐỔI 3: THÊM CÁC TASK MỚI VÀO VÒNG LẶP SỰ KIỆN >>> ###
-        logger.info(f"Khởi động ID sender tới WebSocket: {ID_URL}")
-        all_tasks.append(asyncio.create_task(start_id_sender(id_socket_queue, ID_URL)))
+        all_tasks.append(asyncio.create_task(start_socket_sender(id_socket_queue, ID_CONFIG.get("SOCKET_ID_URI"))))
+        all_tasks.append(asyncio.create_task(start_socket_sender(people_count_queue, ID_CONFIG.get("SOCKET_COUNT_URI"))))
+        all_tasks.append(asyncio.create_task(start_socket_sender(height_queue, ID_CONFIG.get("SOCKET_HEIGHT_URI"))))
         
         # Thêm task giám sát cho các hàng đợi
         all_tasks.append(asyncio.create_task(monitor_queue(frame_queue, "Frame")))

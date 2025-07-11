@@ -28,10 +28,10 @@ limb_color = pose_palette[[9, 9, 9, 9, 7, 7, 7, 0, 0, 0, 0, 0, 16, 16, 16, 16, 1
 
 core_mask = [RKNN.NPU_CORE_AUTO, RKNN.NPU_CORE_0, RKNN.NPU_CORE_1, RKNN.NPU_CORE_2, RKNN.NPU_CORE_0_1, RKNN.NPU_CORE_0_1_2, RKNN.NPU_CORE_ALL]
 
-MODEL_PATH = "python/models/yolov8_pose_new.rknn" 
+MODEL_PATH = "python/models/yolov8n-pose.rknn" 
 
-nmsThresh = 0.4
-objectThresh = 0.5
+nmsThresh = 0.35
+objectThresh = 0.65
 
 def letterbox_resize(image, size, bg_color):
     if isinstance(image, str):
@@ -176,6 +176,7 @@ class HumanDetection:
 
     def inference(self, infer_img):
         results = self.rknn.inference(inputs=[infer_img], data_format='nhwc')
+        print([arr.shape for arr in results])
         return results
 
     def postprocess(self, results, aspect_ratio, offset_x, offset_y):
@@ -233,11 +234,15 @@ class HumanDetection:
                 cv2.line(img, pos1, pos2, [int(x) for x in limb_color[k]], thickness=2, lineType=cv2.LINE_AA)
         return img
 
-    def run_detection(self, img):
-        start_time = time.time()
+    def detect(self, img):
         infer_img, aspect_ratio, offset_x, offset_y = self.preprocess_image(img)
         results = self.inference(infer_img)
         predbox = self.postprocess(results, aspect_ratio, offset_x, offset_y)
+        return predbox
+
+    def run_detection(self, img):
+        start_time = time.time()
+        predbox = self.detect(img)
         end_time = time.time()
         duration = end_time - start_time
         fps_current = 1 / duration if duration > 0 else 0

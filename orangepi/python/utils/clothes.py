@@ -33,14 +33,14 @@ def main():
     model_path = "/home/ubuntu/orangepi/rknn/clothes_image_detection.rknn"  # Đường dẫn đã sửa
     image_path = "/home/ubuntu/orangepi/image.jpg"
 
-    # Khởi tạo RKNN
-    rknn = RKNN()
+    # Khởi tạo RKNN 
+    rknn = RKNN() 
     ret = rknn.load_rknn(model_path)
     if ret != 0:
         print("Error: Failed to load RKNN model")
         exit(ret)
 
-    print("Initializing runtime environment...")
+    print("Initializing runtime environment...") 
     ret = rknn.init_runtime()
     if ret != 0:
         print("Error: Failed to initialize runtime")

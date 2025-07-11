@@ -3,7 +3,9 @@ import websockets
 import json
 import numpy as np
 from datetime import datetime
+from utils.logging_python_orangepi import get_logger
 
+logger = get_logger(__name__)
 
 def _numpy_converter(obj):
     if isinstance(obj, np.ndarray):
@@ -25,9 +27,9 @@ class Socket_Sender:
     async def _test_connection(self):
         try:
             async with websockets.connect(self.server_uri) as ws:
-                print(f"[INFO] Successfully connected to {self.server_uri}")
+                logger.info(f" Successfully connected to {self.server_uri}")
         except Exception as e:
-            print(f"[WARN] Failed to connect during init: {e}")
+            logger.error(f"[WARN] Failed to connect during init: {e}")
 
     async def send_packets(self, packets: dict) -> str:
         """
@@ -38,7 +40,7 @@ class Socket_Sender:
 
             async with websockets.connect(self.server_uri) as ws:
                 await ws.send(message)
-                print(f"[SENT] {message}")
+                logger.info(f"SENT] {message}")
                 response = await ws.recv()
                 print(f"[RECV] {response}")
                 return response
@@ -52,6 +54,17 @@ class Socket_Sender:
             print(error_msg)
             return error_msg
 
+async def start_socket_sender(id_socket_queue: asyncio.Queue, server_uri: str):
+    """
+    Start a background task that continuously sends packets from the queue.
+    """
+    sender = Socket_Sender(server_uri)
+    while True:
+        packets = await id_socket_queue.get()
+        logger.info(f"[LOG]✅✅✅ send packet to {server_uri}: {packets}")
+        response = await sender.send_packets(packets)
+        logger.info(f"[LOG] Server response for packet: {response}")
+        id_socket_queue.task_done()
 
 async def main():
     # Example usage

@@ -41,7 +41,8 @@ OPI_CONFIG = {
 
     # --- CẤU HÌNH WEBSOCKET (TÁCH BIỆT) ---
     "SOCKET_HEIGHT_URI": "ws://192.168.1.168:8080/api/ws/camera",
-    "SOCKET_COUNT_URI": "ws://192.168.1.156:8080/api/ws/camera", # Giả định port và path tương tự
+    "SOCKET_COUNT_URI": "ws://192.168.1.108:8080/api/ws/camera", # Giả định port và path tương tự
+    "SOCKET_ID_URI": "ws://192.168.1.108:9090/api/ws/camera",
     "SOCKET_TABLE_ID": 1,
     # ----------------------------------------
 

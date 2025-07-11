@@ -8,7 +8,7 @@ import numpy as np
 
 # Giả định các module này tồn tại và hoạt động đúng
 from utils.logging_python_orangepi import get_logger
-from utils.yolo_pose import HumanDetection
+from utils.yolo_pose_rknn import HumanDetection
 from utils.pose_color_signature_new import PoseColorSignatureExtractor
 from utils.cut_body_part import extract_body_parts_from_frame
 from .stereo_projector_final import StereoProjector
@@ -26,11 +26,12 @@ class FrameProcessor:
     """
     def __init__(self, batch_size: int = 2):
         """
-        Khởi tạo tất cả các module cần thiết cho việc xử lý. 
+        Khởi tạo tất cả các module cần thiết cho việc xử lý.  
         """
         self.detector = HumanDetection()
-        self.pose_processor = PoseColorSignatureExtractor()
+        self.pose_processor = PoseColorSignatureExtractor() 
         self.stereo_projector = StereoProjector() 
+        self.table_id = 1
         
         mtx_rgb = self.stereo_projector.params.get('mtx_rgb')
         if mtx_rgb is None: raise ValueError("mtx_rgb không có trong file hiệu chỉnh.")
@@ -197,7 +198,7 @@ class FrameProcessor:
                 return None
 
 
-    async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue):
+    async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue):
         """
         Vòng lặp chính: Lấy dữ liệu từ hàng đợi, điều phối tác vụ xử lý.
         """
@@ -238,14 +239,21 @@ class FrameProcessor:
                 # Chạy detection song song
                 detection_results = await asyncio.gather(*[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection], return_exceptions=True)
                 
-                # Tạo tác vụ xử lý cho từng người
+                # BƯỚC: Khởi tạo bộ đếm số người tối đa
+                max_people_counting = 0
+                
+                # Tạo tác vụ xử lý cho từng người và cập nhật max_people_counting
                 all_human_tasks = []
                 for i, detection_result in enumerate(detection_results):
                     if not detection_result or isinstance(detection_result, Exception): continue
-                    
-                    original_rgb, original_depth = loaded_data_map[i]
                     keypoints_data, boxes_data = detection_result
-                    
+
+                    # Cập nhật số người tối đa
+                    num_detected = len(keypoints_data)
+                    if num_detected > max_people_counting:
+                        max_people_counting = num_detected
+
+                    original_rgb, original_depth = loaded_data_map[i]
                     for kpts, box in zip(keypoints_data, boxes_data):
                         # Áp dụng bộ lọc chất lượng tại đây
                         if not self._is_detection_valid(box, kpts, original_rgb.shape):
@@ -255,15 +263,31 @@ class FrameProcessor:
                         all_human_tasks.append(
                             self.process_human_async(frame_number + i, original_rgb, original_depth, box, kpts)
                         )
+
+                # Sau khi tạo task: gửi dữ liệu đếm người
+                count_data = {"total_person": max_people_counting}
+                await people_count_queue.put(count_data)
                 
                 # Thu thập kết quả
                 if all_human_tasks:
                     processing_results = await asyncio.gather(*all_human_tasks, return_exceptions=True)
+
+                    # Lọc chiều cao hợp lệ và gửi vào queue
+                    all_valid_heights_cm = []
                     for result in processing_results:
                         if result and not isinstance(result, Exception):
                             result["camera_id"] = config.OPI_CONFIG.get("device_id", "opi_01")
+                            # Kiểm tra chiều cao
+                            height_m = result.get("est_height_m")
+                            if height_m is not None:
+                                height_cm = height_m * 100.0
+                                if 140.0 <= height_cm <= 190.0:
+                                    all_valid_heights_cm.append(height_cm)
                             await processing_queue.put(result)
-                
+
+                    height_data = {"table_id": self.table_id, "heights_cm": all_valid_heights_cm}
+                    await height_queue.put(height_data)
+
                 frame_number += len(frames_for_detection)
             except Exception as e:
                 logger.error(f"Lỗi không mong muốn trong xử lý lô: {e}", exc_info=True)
@@ -271,13 +295,13 @@ class FrameProcessor:
 # --------------------------------------------------------------------
 # HÀM KHỞI TẠO WORKER
 # --------------------------------------------------------------------
-async def start_processor(frame_queue: asyncio.Queue, processing_queue: asyncio.Queue):
+async def start_processor(frame_queue: asyncio.Queue, processing_queue: asyncio.Queue, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue):
     """
     Khởi tạo và chạy FrameProcessor worker. 
     """
     logger.info("Khởi động worker xử lý (Phiên bản cuối cùng)...")
     try:
         processor = FrameProcessor(batch_size=2)
-        await processor.process_frame_queue(frame_queue, processing_queue)
+        await processor.process_frame_queue(frame_queue, processing_queue, people_count_queue, height_queue)
     except Exception as e:
         logger.error(f"Lỗi nghiêm trọng trong start_processor: {e}", exc_info=True)
