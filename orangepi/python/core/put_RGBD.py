@@ -19,7 +19,7 @@ class SlaveCommunicator:
     """
     Quản lý kết nối và giao tiếp TCP với Slave để nhận frame ToF (Depth + Amplitude).
     """
-    def __init__(self, slave_ip: str, tcp_port: int, timeout: float = 10.0):
+    def __init__(self, slave_ip: str, tcp_port: int, timeout: float = 3.0):
         self.slave_ip = slave_ip
         self.tcp_port = tcp_port
         self.timeout = timeout

@@ -15,12 +15,14 @@ from .reid_manager_new import ReIDManager
 from face_processing.face_v2.face_analyze_new import FaceAnalyze
 from rabbitMQ.rabbitMQ_manager import RabbitMQManager
 
+
 from utils.logging_python_orangepi import get_logger 
 logger = get_logger(__name__)
 
 class PersonReID:
     def __init__( 
         self,
+        id_socket_queue: asyncio.Queue,        
         output_dir="output_frames_id",
         feature_threshold=0.7,
         color_threshold=0.5,
@@ -54,6 +56,7 @@ class PersonReID:
         # model
         self.feature_extractor = FeatureModel()
         self.reid_manager = ReIDManager(
+            id_socket_queue=id_socket_queue,
             db_path=db_path,
             feature_threshold=feature_threshold,
             color_threshold=color_threshold,
@@ -332,6 +335,7 @@ class PersonReID:
         bbox,
         frame_id,
         map_keypoints,
+        time_detect,
     ) -> str:
         """
         Gán person_id. Truyền các thuộc tính vật lý (chiều cao, tọa độ 3D) vào reid_manager.
@@ -389,6 +393,7 @@ class PersonReID:
                         head_point_3d,
                         bbox,
                         frame_id,
+                        time_detect
                     )
                 )
             else:
@@ -405,6 +410,7 @@ class PersonReID:
                     head_point_3d,
                     bbox,
                     frame_id,
+                    time_detect
                 )
             return local_id
 
@@ -420,6 +426,7 @@ class PersonReID:
             head_point_3d,
             bbox,
             frame_id,
+            time_detect
         )
         logger.info(f"No local match → created temp_id: {temp_id}")
 
@@ -452,6 +459,8 @@ class PersonReID:
                 distance_mm = data.get("distance_mm")
                 est_height_m = data.get("est_height_m")
                 head_point_3d = data.get("head_point_3d")
+
+                time_detect = data.get("time_detect")
 
                 if human_image is None or human_image.size == 0:
                     logger.error(f"Missing or empty human_box in data for frame_id {frame_id}")
@@ -512,7 +521,8 @@ class PersonReID:
                         head_point_3d,   # Thêm tọa độ 3D
                         bbox,
                         frame_id,
-                        map_keypoints
+                        map_keypoints,
+                        time_detect
                     )
                 else:
                     final_id = await asyncio.to_thread(
@@ -527,7 +537,8 @@ class PersonReID:
                         head_point_3d,   # Thêm tọa độ 3D
                         bbox,
                         frame_id,
-                        map_keypoints
+                        map_keypoints,
+                        time_detect
                     )
                 # ### <<< KẾT THÚC THAY ĐỔI
 

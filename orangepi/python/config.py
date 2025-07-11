@@ -17,6 +17,7 @@ DEFAULT_OUTPUT_DIR = os.path.join(
 )
 VEC0_PATH = "/usr/local/lib/vec0.so"
 RABBITMQ_URL = "amqp://new_user_rpi:123456@192.168.1.76:5672/"
+ID_URL = "ws://192.168.1.108:9090/api/ws/camera"
 
 # --- CẤU HÌNH CHO Orange Pi (Stereo Vision) ---
 OPI_CONFIG = {

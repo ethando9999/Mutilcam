@@ -1,3 +1,5 @@
+# file: run.py
+
 import argparse
 import asyncio
 import os
@@ -6,17 +8,28 @@ import psutil
 from database.create_db import create_database
 from id.main_id_new import start_id, PersonReID
 
+### <<< THAY ĐỔI 1: IMPORT CÁC THÀNH PHẦN CẦN THIẾT >>> ###
+from socket_manager.id_socket import start_id_sender
+# Import cả queue để có thể giám sát nó
+from config import ID_URL
+### <<< KẾT THÚC THAY ĐỔI 1 >>> ###
+
 from utils.logging_python_orangepi import setup_logging, get_logger
 # Thiết lập logging
 setup_logging()
 logger = get_logger(__name__)
 
-
+### <<< THAY ĐỔI 2: XÓA ĐỊNH NGHĨA QUEUE THỪA >>> ###
+# Dòng này đã bị xóa vì queue toàn cục thực sự được quản lý trong id_socket.py
+# global_id_queue = asyncio.Queue() 
+### <<< KẾT THÚC THAY ĐỔI 2 >>> ###
 
 async def monitor_queue(queue, queue_name):
     """Log queue size periodically."""
     while True:
-        logger.info(f"Kích thước hàng đợi {queue_name}: {queue.qsize()}/{queue.maxsize}")
+        # Sử dụng getattr để tránh lỗi nếu queue không có maxsize
+        maxsize_str = f"/{queue.maxsize}" if hasattr(queue, 'maxsize') and queue.maxsize > 0 else ""
+        logger.info(f"Kích thước hàng đợi {queue_name}: {queue.qsize()}{maxsize_str}")
         await asyncio.sleep(5)
 
 
@@ -71,8 +84,9 @@ async def main(args):
             logger.info(f"Sử dụng cơ sở dữ liệu hiện có: {db_path}")
 
     # Khởi tạo các hàng đợi asyncio
-    frame_queue = asyncio.Queue(maxsize=10)
+    frame_queue = asyncio.Queue(maxsize=100)
     processing_queue = asyncio.Queue(maxsize=1000)
+    id_socket_queue = asyncio.Queue()
 
     # --- CẬP NHẬT PHẦN KHỞI TẠO PersonReID ---
     # Định nghĩa các khóa hợp lệ mà PersonReID.__init__ chấp nhận để tránh TypeError
@@ -90,6 +104,7 @@ async def main(args):
     # Thêm các tham số được xác định lúc chạy (runtime) hoặc đã được xử lý riêng
     filtered_config["device_id"] = device_id
     filtered_config["db_path"] = db_path  # Sử dụng đường dẫn DB đã được xác định ở trên
+    filtered_config["id_socket_queue"] = id_socket_queue
 
     # Khởi tạo PersonReID với các tham số đã được lọc
     person_reid = PersonReID(**filtered_config)
@@ -105,7 +120,17 @@ async def main(args):
         all_tasks.append(asyncio.create_task(start_putter(frame_queue, camera_id)))
         all_tasks.append(asyncio.create_task(start_processor(frame_queue, processing_queue)))
         all_tasks.append(asyncio.create_task(start_id(processing_queue, person_reid_instance)))
+
+        ### <<< THAY ĐỔI 3: THÊM CÁC TASK MỚI VÀO VÒNG LẶP SỰ KIỆN >>> ###
+        logger.info(f"Khởi động ID sender tới WebSocket: {ID_URL}")
+        all_tasks.append(asyncio.create_task(start_id_sender(id_socket_queue, ID_URL)))
+        
+        # Thêm task giám sát cho các hàng đợi
         all_tasks.append(asyncio.create_task(monitor_queue(frame_queue, "Frame")))
+        all_tasks.append(asyncio.create_task(monitor_queue(processing_queue, "Processing")))
+        all_tasks.append(asyncio.create_task(monitor_queue(id_socket_queue, "ID Socket")))
+        ### <<< KẾT THÚC THAY ĐỔI 3 >>> ###
+        
         all_tasks.append(asyncio.create_task(monitor_system()))
         
         # Thêm task rabbitmq từ đối tượng person_reid vào danh sách quản lý
@@ -123,10 +148,12 @@ async def main(args):
         raise
     finally:
         # Hủy tất cả task
+        logger.info("Bắt đầu quá trình dọn dẹp và hủy tác vụ...")
         for task in all_tasks:
             if task and not task.done():
                 task.cancel()
         await asyncio.gather(*all_tasks, return_exceptions=True)
+        logger.info("Tất cả các tác vụ đã được hủy.")
 
         if person_reid_instance and hasattr(person_reid_instance, 'rabbit'):
             await person_reid_instance.rabbit.stop()
@@ -150,7 +177,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--device-id",
-        default="rpi",
+        default="opi", # Thay đổi default thành opi để khớp với cấu hình
         help="Loại thiết bị đang chạy ứng dụng (rpi | opi)",
     )
 

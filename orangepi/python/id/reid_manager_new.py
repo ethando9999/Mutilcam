@@ -2,24 +2,26 @@ import os
 import time
 import json
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import uuid
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import aiosqlite
-import uuid
-# import sqlite_vec
 from sklearn.metrics.pairwise import cosine_similarity
-from utils.pose_color_signature_new import preprocess_color
-from track_local.track import TrackingManager
 
+from track_local.track import TrackingManager
 from utils.logging_python_orangepi import get_logger
+
+from config import OPI_CONFIG
+camera_id = OPI_CONFIG.get("rgb_camera_id")
 
 logger = get_logger(__name__)
 
-class ReIDManager:
+class ReIDManager: 
     def __init__(
         self,
+        id_socket_queue: asyncio.Queue,
         db_path='database.db',
         feature_threshold=0.75,
         color_threshold=0.6,
@@ -27,22 +29,22 @@ class ReIDManager:
         top_k=3,
         global_color_mean=None,
         thigh_weight: float = 4,
-        torso_weight: float = 4, 
+        torso_weight: float = 4,
         feature_weight: float = 0.5,
         color_weight: float = 0.5,
-        δ0_feat = 0.25,
-        δ_margin = 0.05,
-        face_threshold = 0.8,
+        δ0_feat=0.25,
+        δ_margin=0.05,
+        face_threshold=0.8,
     ):
+        self.id_socket_queue = id_socket_queue
         self.db_path = db_path
         self.feature_threshold = feature_threshold
-        self.color_threshold = color_threshold 
+        self.color_threshold = color_threshold
         self.avg_threshold = avg_threshold
         self.top_k = top_k
         self.face_threshold = face_threshold
 
-
-        # incremental stats for global mean
+        # Global color stats
         self.sum_color = np.zeros(51, dtype=np.float64)
         self.count_color = np.zeros(51, dtype=np.int64)
         if global_color_mean is not None:
@@ -57,208 +59,235 @@ class ReIDManager:
             where=self.count_color > 0
         ).astype(np.float32)
 
-        # ------------------------------------------------------------------
-        # THÊM: trọng số cho thigh & torso trên 45-dim
-        # ------------------------------------------------------------------
-        self.thigh_weight = thigh_weight  
+        # Weights for color regions
+        self.thigh_weight = thigh_weight
         self.torso_weight = torso_weight
 
-        # history for moving average per person
+        # History
         self.feature_history = defaultdict(lambda: deque(maxlen=20))
-        self.color_history   = defaultdict(lambda: deque(maxlen=20))
+        self.color_history = defaultdict(lambda: deque(maxlen=20))
         self.face_embedding_history = defaultdict(lambda: deque(maxlen=20))
 
-        # initialization
+        # Async DB setup
         self.db_lock = asyncio.Lock()
         self.db_init = asyncio.Event()
         self.db = None
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.vec_ext = '/usr/local/lib/vec0.so'
-        self.connection = None
-        self.channel = None
-        self.alias_map: dict[str, str] = {} 
 
-        # start init tasks
+        self.alias_map: dict[str, str] = {}
+
         asyncio.create_task(self._init_database())
 
         self.tracking_manager = TrackingManager()
-
         self.hard_face_threshold = 0.8
         self.hard_feature_threshold = 0.7
 
-        # asyncio.create_task(self.setup_rabbitmq(rabbitmq_url))
         logger.info("ReIDManager init successful")
 
     async def _init_database(self):
-        async with self.db_lock: 
-            # 2) Mở kết nối
+        async with self.db_lock:
             db = await aiosqlite.connect(self.db_path)
             await db.execute("PRAGMA foreign_keys = ON;")
             await db.enable_load_extension(True)
-            await db.load_extension(self.vec_ext) 
-            # await db.load_extension(sqlite_vec.loadable_path())
+            await db.load_extension(self.vec_ext)
 
-            # 3) Bản ghi mặc định cho Cameras & Frames
-            #    (chỉ thêm nếu chưa có – tránh lỗi trùng khóa)
+            # Insert default rows
             await db.execute(
                 "INSERT OR IGNORE INTO Cameras(camera_id, location, resolution, model) "
                 "VALUES('edge', 'unknown', 'unknown', 'unknown');"
             )
-
             ts = asyncio.get_event_loop().time()
             await db.execute(
-                "INSERT OR IGNORE INTO Frames(frame_id, timestamp, camera_id) " 
+                "INSERT OR IGNORE INTO Frames(frame_id, timestamp, camera_id) "
                 "VALUES('frame0', ?, 'edge');",
                 (ts,)
             )
 
             await db.commit()
-
-            # 4) Hoàn tất
             self.db = db
             self.db_init.set()
-            logger.info("Database ready, schema initialized, and default rows inserted.")
-
+            logger.info("Database ready and schema initialized.")
 
     async def _ensure_db_ready(self):
         await self.db_init.wait()
 
     def normalize(self, v: np.ndarray) -> np.ndarray | None:
-        """ 
-        Chuẩn hóa một vector. Trả về None nếu đầu vào là None.
-        """
-        # ### <<< THAY ĐỔI: Thêm câu lệnh kiểm tra này
         if v is None:
             return None
-        # ### <<< KẾT THÚC THAY ĐỔI
-
         v = v.flatten()
         n = np.linalg.norm(v)
         return v / n if n > 0 else v
 
-
-    def preprocess_color(self, body_color: np.ndarray):
-        # flat = body_color.flatten().astype(np.float32)
-        # mask = (~np.isnan(flat)).astype(np.float32)
-        # filled = np.where(np.isnan(flat), self.global_color_mean, flat)
-        # normed = self.normalize(filled)
-        # return normed, mask
-        weighted, mask = preprocess_color(body_color, self.thigh_weight, self.torso_weight)
-        normed = self.normalize(weighted)
-        return normed, mask
-    
-    def _update_global_color_stats(self, color_mean: np.ndarray):
-        valid = ~np.isnan(color_mean)
-        self.sum_color[valid] += color_mean[valid]
-        self.count_color[valid] += 1
-        self.global_color_mean[valid] = (
-            self.sum_color[valid] / self.count_color[valid]
-        ).astype(np.float32)
-
+    def pack_id_data(self, pid, gender, race, age, est_height_m, frame_id, head_point_3d, camera_id, time_detect):
+        return {
+            "frame_id": frame_id,
+            "person_id": pid,
+            "gender": gender,
+            "race": race,
+            "age": age,
+            "height": est_height_m,
+            "time_detect": time_detect,
+            "camera_id": camera_id,
+            "point3D": list(head_point_3d)
+        }
 
     async def create_person(self, gender, race, age, body_color, feature, face_embedding,
                             est_height_m, head_point_3d,
-                            bbox_data=None, frame_id=None):
+                            bbox_data=None, frame_id=None,
+                            time_detect=None):
+        """
+        Tạo một nhân vật mới và ghi vào DB. Sau đó đẩy dữ liệu vào id_socket_queue.
+        """
         await self._ensure_db_ready()
         try:
+            pid = str(uuid.uuid4())
+            ts = time_detect if time_detect is not None else time.time()
+
             feat_v = self.normalize(np.array(feature, np.float32) if feature is not None else None)
             face_v = self.normalize(np.array(face_embedding, np.float32) if face_embedding is not None else None)
-            _ = body_color 
-            pid = str(uuid.uuid4())
-            ts = asyncio.get_event_loop().time()
 
             async with self.db_lock:
+                # Đảm bảo camera_id tồn tại trước (tránh lỗi khóa ngoại)
+                await self.db.execute(
+                    "INSERT OR IGNORE INTO Cameras(camera_id, location, resolution, model) VALUES (?, ?, ?, ?);",
+                    (camera_id, "unknown", "unknown", "unknown")
+                )
+
+                # Insert vào bảng chính
                 await self.db.execute("INSERT INTO Persons(person_id) VALUES (?);", (pid,))
                 
-                feat_bytes = feat_v.tobytes() if feat_v is not None else None
-                await self.db.execute("INSERT INTO PersonsVec(person_id, feature_mean) VALUES (?, vec_f32(?));", (pid, feat_bytes))
-
+                if feat_v is not None:
+                    await self.db.execute(
+                        "INSERT INTO PersonsVec(person_id, feature_mean) VALUES (?, vec_f32(?));",
+                        (pid, feat_v.tobytes())
+                    )
                 if face_v is not None:
-                    await self.db.execute("INSERT OR REPLACE INTO FaceVector(person_id, face_embedding) VALUES (?, vec_f32(?));", (pid, face_v.tobytes()))
-                
-                await self.db.execute("INSERT INTO PersonsMeta(person_id, age, gender, race, height_mean) VALUES (?, ?, ?, ?, ?);", (pid, age, gender, race, est_height_m))
+                    await self.db.execute(
+                        "INSERT INTO FaceVector(person_id, face_embedding) VALUES (?, vec_f32(?));",
+                        (pid, face_v.tobytes())
+                    )
 
-                # ### <<< SỬA LỖI TẠI ĐÂY
-                # Đảm bảo frame_id tồn tại trong bảng Frames trước khi tham chiếu đến nó.
+                await self.db.execute(
+                    "INSERT INTO PersonsMeta(person_id, age, gender, race, height_mean) "
+                    "VALUES (?, ?, ?, ?, ?);",
+                    (pid, age, gender, race, est_height_m)
+                )
+
+                # Đảm bảo frame tồn tại trước
                 if frame_id is not None:
                     await self.db.execute(
                         "INSERT OR IGNORE INTO Frames(frame_id, timestamp, camera_id) VALUES (?, ?, ?);",
-                        (frame_id, ts, 'edge')  # Sử dụng camera_id mặc định
+                        (frame_id, ts, camera_id)
                     )
-                # ### <<< KẾT THÚC SỬA LỖI
-                
-                await self.db.execute("INSERT INTO Detections(person_id, timestamp, camera_id, frame_id) VALUES (?, ?, ?, ?);", (pid, ts, None, frame_id))
 
-                # ... (Các câu lệnh INSERT vào FeatureBank và FaceIDBank không đổi) ...
+                # Thêm bản ghi vào Detections
+                await self.db.execute(
+                    "INSERT INTO Detections(person_id, timestamp, camera_id, frame_id) "
+                    "VALUES (?, ?, ?, ?);",
+                    (pid, ts, camera_id, frame_id)
+                )
+
+                # Tạo FeatureBank
                 if feat_v is not None:
-                    cur = await self.db.execute("INSERT INTO FeatureBank(person_id) VALUES (?) RETURNING feature_id;", (pid,))
+                    cur = await self.db.execute(
+                        "INSERT INTO FeatureBank(person_id) VALUES (?) RETURNING feature_id;", (pid,)
+                    )
                     feat_id = (await cur.fetchone())[0]
-                    await self.db.execute("INSERT INTO FeatureBankVec(feature_id, person_id, feature_vec) VALUES (?, ?, vec_f32(?));", (feat_id, pid, feat_v.tobytes()))
+                    await self.db.execute(
+                        "INSERT INTO FeatureBankVec(feature_id, person_id, feature_vec) VALUES (?, ?, vec_f32(?));",
+                        (feat_id, pid, feat_v.tobytes())
+                    )
+
+                # Tạo FaceIDBank
                 if face_v is not None:
-                    cur2 = await self.db.execute("INSERT INTO FaceIDBank(person_id) VALUES (?) RETURNING face_id;", (pid,))
+                    cur2 = await self.db.execute(
+                        "INSERT INTO FaceIDBank(person_id) VALUES (?) RETURNING face_id;", (pid,)
+                    )
                     face_id = (await cur2.fetchone())[0]
-                    await self.db.execute("INSERT INTO FaceIDBankVec(face_id, person_id, face_vec) VALUES (?, ?, vec_f32(?));", (face_id, pid, face_v.tobytes()))
+                    await self.db.execute(
+                        "INSERT INTO FaceIDBankVec(face_id, person_id, face_vec) VALUES (?, ?, vec_f32(?));",
+                        (face_id, pid, face_v.tobytes())
+                    )
 
                 await self.db.commit()
 
-            if feat_v is not None: self.feature_history[pid].append(feat_v)
-            if face_v is not None: self.face_embedding_history[pid].append(face_v)
+            # Lưu history (dùng cho EMA)
+            if feat_v is not None:
+                self.feature_history[pid].append(feat_v)
+            if face_v is not None:
+                self.face_embedding_history[pid].append(face_v)
 
-            # if bbox_data and head_point_3d and frame_id:
-            #     self.tracking_manager_3D.add_track(object_id=pid, bbox=bbox_data, point3d=head_point_3d, frame_id=frame_id)
-            #     logger.info(f"Added new 3D track for ID: {pid}")
+            # Gửi vào tracker
             if bbox_data is not None and frame_id is not None:
                 self.tracking_manager.add_track(pid, bbox_data, frame_id, feature=feat_v)
                 logger.info("Added new track to tracking_manager")
+
+            # Gửi vào socket queue
+            if self.id_socket_queue is not None and head_point_3d is not None:
+                data = self.pack_id_data(
+                    pid, gender, race, age, est_height_m,
+                    frame_id, head_point_3d, camera_id, ts
+                )
+                await self.id_socket_queue.put(data)
 
             return pid
         except Exception as e:
             logger.exception(f"[DB] Failed to create person: {e}")
             return None
 
+
     async def update_person(self, person_id, gender=None, race=None, age=None,
                             body_color=None, feature=None, face_embedding=None,
                             est_height_m=None, head_point_3d=None,
-                            bbox_data=None, frame_id=None):
+                            bbox_data=None, frame_id=None,
+                            time_detect=None):
         await self._ensure_db_ready()
         try:
             person_id = self.alias_map.get(person_id, person_id)
             feat_v = self.normalize(np.asarray(feature, np.float32) if feature is not None else None)
             face_v = self.normalize(np.asarray(face_embedding, np.float32) if face_embedding is not None else None)
-            _ = body_color
-            ts = asyncio.get_event_loop().time()
+            ts = time_detect if time_detect is not None else time.time()
 
             async with self.db_lock:
                 if frame_id is not None:
                     await self.db.execute(
                         "INSERT OR IGNORE INTO Frames(frame_id, timestamp, camera_id) VALUES (?, ?, ?);",
-                        (frame_id, ts, 'edge')
+                        (frame_id, ts, camera_id)
                     )
-                
-                await self.db.execute("INSERT INTO Detections(person_id, timestamp, camera_id, frame_id) VALUES (?, ?, ?, ?);", (person_id, ts, None, frame_id))
 
-                if feat_v is not None: self.feature_history[person_id].append(feat_v)
-                if face_v is not None: self.face_embedding_history[person_id].append(face_v)
+                await self.db.execute(
+                    "INSERT INTO Detections(person_id, timestamp, camera_id, frame_id) VALUES (?, ?, ?, ?);",
+                    (person_id, ts, camera_id, frame_id)
+                )
 
-                # ### <<< THAY ĐỔI: Sử dụng `[person_id]` thay vì `.get(person_id)`
-                # Điều này đảm bảo `compute_ema` luôn nhận được một deque (có thể rỗng)
+                if feat_v is not None:
+                    self.feature_history[person_id].append(feat_v)
+                if face_v is not None:
+                    self.face_embedding_history[person_id].append(face_v)
+
                 mv_feat, mv_face = await asyncio.gather(
                     asyncio.to_thread(compute_ema, self.feature_history[person_id]),
                     asyncio.to_thread(compute_ema, self.face_embedding_history[person_id])
                 )
-                # ### <<< KẾT THÚC THAY ĐỔI
 
                 if mv_feat is not None:
-                    await self.db.execute("UPDATE PersonsVec SET feature_mean = vec_f32(?) WHERE person_id = ?;", (mv_feat.tobytes(), person_id))
+                    await self.db.execute(
+                        "UPDATE PersonsVec SET feature_mean = vec_f32(?) WHERE person_id = ?;",
+                        (mv_feat.tobytes(), person_id)
+                    )
                 if mv_face is not None:
-                    await self.db.execute("UPDATE FaceVector SET face_embedding = vec_f32(?) WHERE person_id = ?;", (mv_face.tobytes(), person_id))
+                    await self.db.execute(
+                        "UPDATE FaceVector SET face_embedding = vec_f32(?) WHERE person_id = ?;",
+                        (mv_face.tobytes(), person_id)
+                    )
 
                 fields, params = [], []
                 if age is not None: fields.append("age = ?"); params.append(age)
                 if gender is not None: fields.append("gender = ?"); params.append(gender)
                 if race is not None: fields.append("race = ?"); params.append(race)
                 if est_height_m is not None: fields.append("height_mean = ?"); params.append(est_height_m)
-                
+
                 if fields:
                     sql = f"UPDATE PersonsMeta SET {', '.join(fields)} WHERE person_id = ?;"
                     params.append(person_id)
@@ -266,17 +295,29 @@ class ReIDManager:
 
                 await self.db.commit()
 
-            # if bbox_data and head_point_3d and frame_id:
-            #     self.tracking_manager_3D.update_track(object_id=person_id, bbox=bbox_data, point3d=head_point_3d, frame_id=frame_id)
-            #     logger.info(f"Updated 3D track for ID: {person_id}")
             if bbox_data is not None and frame_id is not None:
                 self.tracking_manager.update_track(person_id, bbox_data, frame_id, feature=feat_v)
                 logger.info("Updated track in tracking_manager")
+
+            if head_point_3d is not None:
+                data = self.pack_id_data(
+                    pid=person_id,
+                    gender=gender,
+                    race=race,
+                    age=age,
+                    est_height_m=est_height_m,
+                    frame_id=frame_id,
+                    head_point_3d=head_point_3d,
+                    camera_id=camera_id,
+                    time_detect=ts
+                )
+                await self.id_socket_queue.put(data)
 
             return True
         except Exception as e:
             logger.exception(f"[DB] Failed to update_person: {e}")
             return None
+
         
     async def match_id(self, new_gender, new_race, new_age, new_body_color, new_feature, new_face_embedding=None,
                        new_height_m=None, new_head_point_3d=None,

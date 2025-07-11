@@ -8,7 +8,7 @@ import numpy as np
 
 # Giả định các module này tồn tại và hoạt động đúng
 from utils.logging_python_orangepi import get_logger
-from utils.yolo_pose import HumanDetection
+from utils.yolo_pose_rknn import HumanDetection
 from utils.pose_color_signature_new import PoseColorSignatureExtractor
 from utils.cut_body_part import extract_body_parts_from_frame
 from .stereo_projector_final import StereoProjector
@@ -123,7 +123,7 @@ class FrameProcessor:
 
                 # BƯỚC 2: Lọc khoảng cách NGAY LẬP TỨC (Yêu cầu 3.2 mét)
                 if status != "OK" or distance_mm is None or not (800 < distance_mm < 3200):
-                    return None # Bỏ qua ngay, không xử lý thêm
+                    return None  # Bỏ qua ngay, không xử lý thêm
 
                 # BƯỚC 3: Nếu khoảng cách hợp lệ, mới chạy các tác vụ nặng còn lại
                 logger.info(f"✅ Người hợp lệ trong phạm vi 4m. Khoảng cách: {distance_mm/1000:.2f}m. Bắt đầu xử lý sâu...")
@@ -131,10 +131,11 @@ class FrameProcessor:
 
                 # Chuẩn bị và chạy song song các tác vụ còn lại
                 height_task = self._run_in_executor(self.height_estimator.estimate, keypoints, distance_m)
-                
+
                 human_box_img = rgb_frame[box[1]:box[3], box[0]:box[2]]
-                if human_box_img.size == 0: return None
-                
+                if human_box_img.size == 0:
+                    return None
+
                 adjusted_keypoints = adjust_keypoints_to_box(keypoints, box)
                 body_parts_task = self._run_in_executor(extract_body_parts_from_frame, human_box_img, adjusted_keypoints)
                 projection_task = self._run_in_executor(self.stereo_projector.project_rgb_box_to_tof, box, tof_depth_map)
@@ -142,39 +143,59 @@ class FrameProcessor:
                 (est_height_m, height_status), body_parts_boxes, tof_box_projected = await asyncio.gather(
                     height_task, body_parts_task, projection_task
                 )
-                
+
                 # Lưu ảnh debug chỉ cho các trường hợp thành công
                 if tof_box_projected:
                     debug_base_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S%f')}_F{frame_id}"
                     asyncio.create_task(self.save_debug_images(debug_base_name, rgb_frame.copy(), tof_depth_map.copy(), box, tof_box_projected))
 
+                # BƯỚC 4: Lấy tọa độ đầu 3D nếu có
                 head_center_kp = get_head_center(keypoints)
-                world_point_3d = None # Khởi tạo là None
-                
-                if head_center_kp and distance_mm is not None:
-                    # Lấy tọa độ 3D của đầu (đơn vị mét)
-                    # stereo_projector.unproject_rgb_to_3d trả về mảng shape (1, 3)
-                    # nên ta lấy phần tử đầu tiên
-                    head_points_3d = self.stereo_projector._project_points_vectorized(head_center_kp, distance_mm)
-                    if head_points_3d is not None and len(head_points_3d) > 0:
-                        world_point_3d = head_points_3d[0] # Lấy vector [x, y, z]
+                world_point_3d = None
 
+                if head_center_kp is not None and distance_mm is not None:
+                    # Convert head_center_kp to (1,1,2) format for undistort
+                    pt = np.array([[head_center_kp]], dtype=np.float32)  # shape (1,1,2)
+                    undistorted = cv2.undistortPoints(
+                        pt,
+                        self.stereo_projector.mtx_rgb,
+                        self.stereo_projector.dist_rgb,
+                        None,
+                        self.stereo_projector.mtx_rgb
+                    )  # shape (1,1,2)
+
+                    # Back-project to 3D
+                    head_points_3d = self.stereo_projector._back_project_to_3d(undistorted, distance_mm)
+                    if head_points_3d is not None and head_points_3d.shape[0] > 0:
+                        world_point_3d = head_points_3d[0]  # Lấy vector [x, y, z]
+
+                # BƯỚC 5: Logging & trả kết quả
                 distance_str = f"{distance_mm:.2f}mm" if distance_mm is not None else "N/A"
                 height_str = f"{est_height_m:.2f}m" if est_height_m is not None else "N/A"
 
-                logger.info(f"✅✅ Xử lý hoàn tất: Khoảng cách={distance_str}, Chiều cao={height_str} ({height_status})")
-
+                logger.info(f"✅✅ Xử lý hoàn tất: Khoảng cách={distance_str}, Chiều cao={height_str} ({height_status}), head_point_3d: {world_point_3d}")
                 if world_point_3d is not None:
                     logger.info(f"Tọa độ đầu 3D (World Space, mét): {world_point_3d}")
 
+                time_detect = datetime.now().isoformat()
                 return {
-                    "frame_id": frame_id, "human_box": human_box_img, "body_parts": body_parts_boxes, "body_color": None,
-                    "head_point_3d": world_point_3d, "bbox": box, "map_keypoints": keypoints,
-                    "distance_mm": distance_mm, "est_height_m": est_height_m, "height_status": height_status
+                    "frame_id": frame_id,
+                    "human_box": human_box_img,
+                    "body_parts": body_parts_boxes,
+                    "body_color": None,
+                    "head_point_3d": world_point_3d,
+                    "bbox": box,
+                    "map_keypoints": keypoints,
+                    "distance_mm": distance_mm,
+                    "est_height_m": est_height_m,
+                    "height_status": height_status,
+                    "time_detect": time_detect,
                 }
+
             except Exception as e:
                 logger.error(f"Lỗi xử lý người cho frame {frame_id}: {e}", exc_info=True)
                 return None
+
 
     async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue):
         """

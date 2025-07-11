@@ -65,25 +65,34 @@ class StereoProjector:
             logger.error(f"Lỗi khi đọc file hiệu chỉnh '{file_path}': {e}", exc_info=True)
             raise
 
-    def _project_points_vectorized(self, rgb_points_2d: np.ndarray, depth_mm: float) -> np.ndarray | None:
+    def _back_project_to_3d(self, undistorted_points: np.ndarray, depth_mm: float) -> np.ndarray:
         """
-        Chiếu một mảng các điểm 2D từ hệ RGB sang hệ ToF bằng phép tính vector hóa.
-        Nhanh hơn đáng kể so với việc lặp qua từng điểm.
+        Chiếu các điểm 2D undistorted sang không gian 3D trong hệ RGB.
         """
-        # 1. Undistort điểm RGB
-        undistorted_points = cv2.undistortPoints(rgb_points_2d, self.mtx_rgb, self.dist_rgb, None, self.mtx_rgb)
-        
-        # 2. Chiếu điểm 2D undistorted ra 3D
         u_v = undistorted_points.reshape(-1, 2)
         x_3d = (u_v[:, 0] - self.cx_rgb) * depth_mm / self.fx_rgb
         y_3d = (u_v[:, 1] - self.cy_rgb) * depth_mm / self.fy_rgb
-        
-        points_3d = np.stack([x_3d, y_3d, np.full_like(x_3d, depth_mm)], axis=-1)
+        z_3d = np.full_like(x_3d, depth_mm)
 
-        # 3. Chiếu điểm 3D vào mặt phẳng ảnh ToF
+        return np.stack([x_3d, y_3d, z_3d], axis=-1)
+
+
+    def _project_points_vectorized(self, rgb_points_2d: np.ndarray, depth_mm: float) -> np.ndarray | None:
+        """
+        Chiếu một mảng các điểm 2D từ hệ RGB sang hệ ToF bằng phép tính vector hóa.
+        """
+        # Bước 1: Undistort điểm RGB (kết quả là ndarray, không phải tuple)
+        undistorted_points = cv2.undistortPoints(rgb_points_2d, self.mtx_rgb, self.dist_rgb, None, self.mtx_rgb)
+
+        # Bước 2: Chiếu ra không gian 3D
+        points_3d = self._back_project_to_3d(undistorted_points, depth_mm)
+
+        # Bước 3: Chiếu vào mặt phẳng ảnh ToF
         tof_points_2d, _ = cv2.projectPoints(points_3d, self.R, self.T, self.mtx_tof, self.dist_tof)
-        
+
         return tof_points_2d.reshape(-1, 2) if tof_points_2d is not None else None
+
+
 
     def get_robust_distance(self, rgb_box: tuple, tof_depth_map: np.ndarray) -> tuple[float | None, str]:
         """
