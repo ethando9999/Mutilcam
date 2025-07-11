@@ -7,7 +7,7 @@ import time
 WEBSOCKET_URL = "ws://192.168.1.168:8080/api/ws/camera"
 TABLE_ID = 1
 # Mảng dữ liệu chiều cao mẫu (đơn vị cm) để gửi đi
-SAMPLE_HEIGHTS_CM = [156.5, 153.2, 158.9, 154.2] 
+SAMPLE_HEIGHTS_CM = [151.5, 153.2, 156.9, 148.2] 
  
 def run_test():
     """
@@ -26,7 +26,7 @@ def run_test():
         ws = websocket.create_connection(WEBSOCKET_URL, timeout=10)
         print(">>> Kết nối thành công!") 
 
-        # Gửi dữ liệu
+        # Gửi dữ liệu 
         json_payload = json.dumps(payload)
         print(f"--> Đang gửi: {json_payload}")
         ws.send(json_payload)

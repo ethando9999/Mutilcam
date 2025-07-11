@@ -13,10 +13,10 @@ from utils.pose_color_signature_new import PoseColorSignatureExtractor
 from utils.cut_body_part import extract_body_parts_from_frame
 from .stereo_projector_final import StereoProjectorFinal
 from .height_estimator_pro import HeightEstimatorPro
-from utils.latest_queue import LatestFrameQueue # Sửa lỗi chính tả "lastest"
+from core.lastest_queue import LatestFrameQueue # Sửa lỗi chính tả "lastest"
 
 # <<< SỬA LỖI IMPORT: Trỏ đến đúng file chứa lớp Track3DPro >>>
-from tracking.track_3d_pro import Track3DPro
+from track_local.tracking_3Dpro import Track3DPro
 
 logger = get_logger(__name__)
 

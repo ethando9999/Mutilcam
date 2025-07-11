@@ -437,7 +437,7 @@ class PersonReID:
 
                 frame_id = frame_data.get("frame_id")
                 human_image = frame_data.get("human_box")
-                body_color = frame_data.get("body_color")
+                body_color = frame_data.get("body_color") 
                 body_parts = frame_data.get("body_parts", {})
                 bbox = frame_data.get("bbox")
                 map_keypoints = frame_data.get("map_keypoints", {})

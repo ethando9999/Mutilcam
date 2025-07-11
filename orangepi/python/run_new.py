@@ -10,7 +10,7 @@ from id.main_id_new import start_id, PersonReID
 from utils.logging_python_orangepi import setup_logging, get_logger
 from core.processing import start_processor
 from core.put_frame_opi import start_putter
-from orangepi.python.config_x import DEVICE_ID_CONFIG_2 as ID_CONFIG 
+from config import OPI_CONFIG as ID_CONFIG 
 
 setup_logging()
 logger = get_logger(__name__)
