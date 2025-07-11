@@ -120,17 +120,21 @@ class ReIDManager:
         return v / n if n > 0 else v
 
     def pack_id_data(self, pid, gender, race, age, est_height_m, frame_id, head_point_3d, camera_id, time_detect):
+        def safe(value):
+            return "Unknow" if value is None else value
+
         return {
             "frame_id": frame_id,
             "person_id": pid,
-            "gender": gender,
-            "race": race,
-            "age": age,
+            "gender": safe(gender),
+            "race": safe(race),
+            "age": safe(age),
             "height": est_height_m,
             "time_detect": time_detect,
             "camera_id": camera_id,
-            "point3D": list(head_point_3d)
+            "point3D": list(head_point_3d) if head_point_3d is not None else "Unknow"
         }
+
 
     async def create_person(self, gender, race, age, body_color, feature, face_embedding,
                             est_height_m, head_point_3d,

@@ -8,7 +8,7 @@ import numpy as np
 
 # Giả định các module này tồn tại và hoạt động đúng
 from utils.logging_python_orangepi import get_logger
-from utils.yolo_pose_rknn import HumanDetection
+from utils.yolo_pose import HumanDetection
 from utils.pose_color_signature_new import PoseColorSignatureExtractor
 from utils.cut_body_part import extract_body_parts_from_frame
 from .stereo_projector_final import StereoProjector
@@ -26,11 +26,11 @@ class FrameProcessor:
     """
     def __init__(self, batch_size: int = 2):
         """
-        Khởi tạo tất cả các module cần thiết cho việc xử lý.
+        Khởi tạo tất cả các module cần thiết cho việc xử lý. 
         """
         self.detector = HumanDetection()
         self.pose_processor = PoseColorSignatureExtractor()
-        self.stereo_projector = StereoProjector()
+        self.stereo_projector = StereoProjector() 
         
         mtx_rgb = self.stereo_projector.params.get('mtx_rgb')
         if mtx_rgb is None: raise ValueError("mtx_rgb không có trong file hiệu chỉnh.")

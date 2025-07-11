@@ -468,7 +468,7 @@ class PersonReID:
 
                 # ... (Phần xử lý feature và face không đổi) ...
                 if hasattr(self, "extract_feature_async"):
-                    if asyncio.iscoroutinefunction(self.extract_feature_async):
+                    if asyncio.iscoroutinefunction(self.extract_feature_async):    
                         task_feat = self.extract_feature_async(human_image)
                     else:
                         task_feat = asyncio.to_thread(self.extract_feature_async, human_image)
@@ -493,7 +493,7 @@ class PersonReID:
                             logger.warning(f"Empty head_crop at {head_bbox}")
                     else:
                         logger.warning(f"Invalid head_bbox: {head_bbox}")
-
+ 
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 feature_person = results[0]
                 if isinstance(feature_person, Exception):
