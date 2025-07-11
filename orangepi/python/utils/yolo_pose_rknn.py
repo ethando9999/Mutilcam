@@ -28,12 +28,12 @@ limb_color = pose_palette[[9, 9, 9, 9, 7, 7, 7, 0, 0, 0, 0, 0, 16, 16, 16, 16, 1
 
 core_mask = [RKNN.NPU_CORE_AUTO, RKNN.NPU_CORE_0, RKNN.NPU_CORE_1, RKNN.NPU_CORE_2, RKNN.NPU_CORE_0_1, RKNN.NPU_CORE_0_1_2, RKNN.NPU_CORE_ALL]
 
-MODEL_PATH = "python/models/yolov8_pose.rknn"
+MODEL_PATH = "python/models/yolov11n_pose.rknn"
 
 nmsThresh = 0.4
 objectThresh = 0.5
 
-def letterbox_resize(image, size, bg_color):
+def letterbox_resize(image, size, bg_color):        
     if isinstance(image, str):
         image = cv2.imread(image)
     target_width, target_height = size

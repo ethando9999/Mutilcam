@@ -112,7 +112,7 @@ class SlaveCommunicator:
                 return None, None
 
 class FramePutter:
-    def __init__(self, rgb_camera_id: int, target_fps: int = 10):
+    def __init__(self, rgb_camera_id: int, target_fps: int = 3):
         self.stop_event = asyncio.Event()
         self.rgb_camera_id = rgb_camera_id
         

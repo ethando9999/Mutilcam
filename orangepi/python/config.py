@@ -5,13 +5,11 @@ import os
 # Đường dẫn gốc của dự án, giả sử file config.py nằm trong thư mục python/
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# <<< ======================= THÊM CÁC HẰNG SỐ BỊ THIẾU ======================= >>>
-FEATURE_DIMENSIONS = 512    # Kích thước vector đặc trưng của OSNet
-FACE_DIMENSIONS = 128     # Kích thước vector đặc trưng của MobileFaceNet
-# <<< ===================== KẾT THÚC THÊM HẰNG SỐ ===================== >>>
+FEATURE_DIMENSIONS = 512
+FACE_DIMENSIONS = 128
 
 DEFAULT_OUTPUT_DIR = os.path.join(
-    os.path.dirname(BASE_DIR), # Đi lên một cấp để ra thư mục orangepi/
+    os.path.dirname(BASE_DIR),
     "results",
     "output_frames_id"
 )
@@ -27,8 +25,8 @@ OPI_CONFIG = {
     # --- Cấu hình cho Stereo Producer (put_RGBD.py) ---
     "slave_ip": "192.168.100.2",
     "tcp_port": 5005,
-    "rgb_camera_id": 1,
-    "rgb_device_path": "/dev/rgb_cam", 
+    "rgb_camera_id": 0,
+    "rgb_device_path": "/dev/rgb_cam",
     "rgb_resolution": (640, 480),
     "rgb_framerate": 15,
 
@@ -36,13 +34,13 @@ OPI_CONFIG = {
     "model_path": os.path.join(BASE_DIR, "models", "yolov8_pose.rknn"),
     "calib_file_path": os.path.join(BASE_DIR, "depth_processing/cali_result", "0.9305.npz"),
     "results_dir": os.path.join(BASE_DIR, "results"),
-    "distance_threshold_m": 4.0, # Ngưỡng khoảng cách 4 mét
+    "distance_threshold_m": 4.0,
 
-    # --- CẤU HÌNH WEBSOCKET (TÁCH BIỆT) ---
-    "SOCKET_HEIGHT_URI": "ws://192.168.1.168:8080/api/ws/camera",
-    "SOCKET_COUNT_URI": "ws://192.168.1.156:8080/api/ws/camera", # Giả định port và path tương tự
+    # --- CẤU HÌNH WEBSOCKET (ĐÃ SỬA LẠI ĐÚNG) ---
+    "SOCKET_COUNT_URI": "ws://192.168.1.108:8080/api/ws/camera", # ✅ Gửi sự kiện phát hiện người
+    "SOCKET_HEIGHT_URI": "ws://192.168.1.168:8080/api/ws/camera", # ✅ Gửi dữ liệu chiều cao
     "SOCKET_TABLE_ID": 1,
-    # ----------------------------------------
+    # -----------------------------------------------
 
     # --- Cấu hình Re-ID ---
     "output_dir": DEFAULT_OUTPUT_DIR,
@@ -54,7 +52,7 @@ OPI_CONFIG = {
 
 # --- CẤU HÌNH CHO Raspberry Pi (Single Camera) ---
 RPI_CONFIG = {
-    "device_id": "rpi_01", 
+    "device_id": "rpi_01",
     "db_path": os.path.join(os.path.dirname(BASE_DIR), "database", "database_rpi.db"),
     "camera_indices": [0],
     # ... các cấu hình khác cho RPi

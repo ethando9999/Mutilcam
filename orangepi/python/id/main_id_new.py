@@ -435,7 +435,7 @@ class PersonReID:
             logger.error(f"data must be a dict, got {type(data)}")
             return None
 
-        for attempt in range(1, max_retries + 1):
+        for attempt in range(1, max_retries + 1): 
             try:
                 start_time = time.time()
 

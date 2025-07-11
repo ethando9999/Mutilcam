@@ -63,8 +63,8 @@ class HumanDetection:
             verbose=False,
             classes=self.classes,
             # device=self.device,
-            conf=0.4,
-            iou=0.4 
+            conf=0.7,
+            iou=0.5 
         )
         self.results = results[0] 
 
@@ -74,7 +74,7 @@ class HumanDetection:
         fps_current = 1 / duration if duration > 0 else 0
         self.fps_avg = (self.fps_avg * self.call_count + fps_current) / (self.call_count + 1)
         self.call_count += 1
-        logger.info(f"FPS Human detection: {self.fps_avg:.2f}")
+        logger.info(f"FPS Human detection: {self.fps_avg:.2f}") 
         
         if not results:  # Handle empty results
             return np.array([]), []
