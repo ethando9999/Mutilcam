@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 import numpy as np
 
-# Giả định các module này tồn tại và hoạt động đúng
+# Giả định các module này tồn tại và hoạt động đúng 
 from utils.logging_python_orangepi import get_logger
 from utils.yolo_pose import HumanDetection
 from utils.pose_color_signature_new import PoseColorSignatureExtractor
@@ -108,19 +108,19 @@ class FrameProcessor:
         """
         async with self.semaphore:
             try:
-                # BƯỚC 1: Tính khoảng cách bằng vùng thân (torso) để tăng ổn định
+                # BƯỚC 1: Tính khoảng cách tin cậy (với phương pháp tinh chỉnh mới)
                 torso_box = get_torso_box(keypoints, box)
+                # Sử dụng hàm get_robust_distance đã được cải tiến
                 distance_mm, status = await self._run_in_executor(self.stereo_projector.get_robust_distance, torso_box, tof_depth_map)
 
                 # BƯỚC 2: Lọc khoảng cách NGAY LẬP TỨC (Yêu cầu 4 mét)
                 if status != "OK" or distance_mm is None or not (100 < distance_mm < 4000):
-                    return None # Bỏ qua ngay, không xử lý thêm
+                    return None
 
-                # BƯỚC 3: Nếu khoảng cách hợp lệ, mới chạy các tác vụ nặng còn lại
+                # BƯỚC 3: Nếu khoảng cách hợp lệ, chạy các tác vụ nặng còn lại
                 logger.info(f"✅ Người hợp lệ trong phạm vi 4m. Khoảng cách: {distance_mm/1000:.2f}m. Bắt đầu xử lý sâu...")
                 distance_m = distance_mm / 1000.0
 
-                # Chuẩn bị và chạy song song các tác vụ còn lại
                 height_task = self._run_in_executor(self.height_estimator.estimate, keypoints, distance_m)
                 
                 human_box_img = rgb_frame[box[1]:box[3], box[0]:box[2]]
@@ -128,16 +128,16 @@ class FrameProcessor:
                 
                 adjusted_keypoints = adjust_keypoints_to_box(keypoints, box)
                 body_parts_task = self._run_in_executor(extract_body_parts_from_frame, human_box_img, adjusted_keypoints)
-                projection_task = self._run_in_executor(self.stereo_projector.project_rgb_box_to_tof, box, tof_depth_map)
+
+                # **TỐI ƯU**: Gọi hàm chiếu với khoảng cách đã tính, không tính lại
+                projection_task = self._run_in_executor(self.stereo_projector.project_rgb_box_to_tof, box, distance_mm, tof_depth_map.shape)
 
                 (est_height_m, height_status), body_parts_boxes, tof_box_projected = await asyncio.gather(
                     height_task, body_parts_task, projection_task
                 )
 
-                # Kiểm tra kết quả
                 if not est_height_m: return None
                 
-                # Lưu ảnh debug chỉ cho các trường hợp thành công
                 if tof_box_projected:
                     debug_base_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S%f')}_F{frame_id}"
                     asyncio.create_task(self.save_debug_images(debug_base_name, rgb_frame.copy(), tof_depth_map.copy(), box, tof_box_projected))
@@ -147,10 +147,13 @@ class FrameProcessor:
                 
                 logger.info(f"✅✅ Xử lý hoàn tất: Khoảng cách={distance_m:.2f}m, Chiều cao={est_height_m:.2f}m ({height_status})")
 
+                # Dữ liệu trả về không thay đổi cấu trúc, để logic ReID hiện tại không bị ảnh hưởng
                 return {
                     "frame_id": frame_id, "human_box": human_box_img, "body_parts": body_parts_boxes,
                     "head_point_3d": head_point_3d, "bbox": box, "map_keypoints": keypoints,
-                    "distance_mm": distance_mm, "est_height_m": est_height_m, "height_status": height_status
+                    "distance_mm": distance_mm, 
+                    "est_height_m": est_height_m, # Chiều cao chưa được làm mịn
+                    "height_status": height_status
                 }
             except Exception as e:
                 logger.error(f"Lỗi xử lý người cho frame {frame_id}: {e}", exc_info=True)

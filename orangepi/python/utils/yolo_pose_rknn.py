@@ -16,8 +16,8 @@ OBJECT_THRESH = 0.5
 
 # --- Các hàm phụ trợ ---
 
-def letterbox(im, new_shape=(640, 640), color=(114, 114, 114)):
-    """Resize và đệm ảnh để vừa với kích thước yêu cầu của model."""
+def letterbox(im, new_shape=(640, 640), color=(114, 114, 114)): 
+    """Resize và đệm ảnh để vừa với kích thước yêu cầu của model.""" 
     shape = im.shape[:2]
     r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
     

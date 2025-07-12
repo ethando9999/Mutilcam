@@ -40,7 +40,7 @@ async def main(args):
     """Điểm vào chính của ứng dụng."""
     logger.info("Khởi động ứng dụng chính…")
 
-    device_id = args.device_id
+    device_id = args.device_id 
     logger.info(f"Đang chạy ở chế độ device_id = {device_id}")
 
     if "opi" in device_id:

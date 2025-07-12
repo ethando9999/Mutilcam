@@ -23,7 +23,7 @@ class StereoProjector:
                  max_depth_mm: int = 8000,
                  min_valid_pixels: int = 100,
                  max_std_dev: float = 5.0,
-                 assumed_depth_mm: float = 2500.0):
+                 assumed_depth_mm: float = 1800.0):
         
         self.params = self._load_calibration(calib_file_path)
         
@@ -55,7 +55,7 @@ class StereoProjector:
         try:
             logger.info(f"Đang tải dữ liệu hiệu chỉnh stereo từ '{file_path}'...")
             with np.load(file_path) as data:
-                params = {key: data[key] for key in data}
+                params = {key: data[key] for key in data}  
             logger.info("Tải dữ liệu hiệu chỉnh stereo thành công.")
             return params
         except Exception as e:
@@ -82,64 +82,64 @@ class StereoProjector:
         
         return tof_points_2d.reshape(-1, 2) if tof_points_2d is not None else None
 
-    def get_robust_distance(self, rgb_box: tuple, tof_depth_map: np.ndarray) -> tuple[float | None, str]:
+    def get_robust_distance(self, rgb_box: tuple, tof_depth_map: np.ndarray, refine_steps: int = 1) -> tuple[float | None, str]:
         """
-        Ước tính khoảng cách đáng tin cậy từ một bounding box RGB bằng cách chiếu nó
-        sang bản đồ độ sâu ToF và phân tích vùng ROI tương ứng.
+        Ước tính khoảng cách đáng tin cậy và có thể tinh chỉnh lặp lại để tăng độ chính xác.
         """
-        # --- 1. Xác thực đầu vào ---
-        xmin, ymin, xmax, ymax = map(int, rgb_box)
+        xmin, ymin, xmax, ymax = map(int, rgb_box) 
         if xmax <= xmin or ymax <= ymin:
             return None, "Box RGB không hợp lệ"
-            
-        # --- 2. Chiếu sơ bộ để xác định ROI trên ToF ---
-        rgb_corners = np.array([[xmin, ymin], [xmax, ymax]], dtype=np.float32).reshape(-1, 1, 2)
-        try:
-            tof_corners_approx = self._project_points_vectorized(rgb_corners, self.ASSUMED_DEPTH_MM)
-            if tof_corners_approx is None:
-                return None, "Lỗi chiếu sơ bộ"
-        except Exception as e:
-            logger.error(f"Lỗi trong bước chiếu sơ bộ: {e}", exc_info=True)
-            return None, "Lỗi chiếu sơ bộ"
-        
-        # --- 3. Trích xuất ROI và lọc các điểm độ sâu hợp lệ ---
-        tof_xmin, tof_ymin = np.min(tof_corners_approx, axis=0)
-        tof_xmax, tof_ymax = np.max(tof_corners_approx, axis=0)
-        
-        h, w = tof_depth_map.shape
-        tx1, ty1 = max(0, int(tof_xmin)), max(0, int(tof_ymin))
-        tx2, ty2 = min(w, int(tof_xmax)), min(h, int(tof_ymax))
-        
-        if tx1 >= tx2 or ty1 >= ty2:
-            return None, "ROI ToF rỗng"
 
-        depth_roi = tof_depth_map[ty1:ty2, tx1:tx2]
-        valid_depths = depth_roi[depth_roi > 0]
+        # Bắt đầu với khoảng cách giả định
+        current_depth_mm = self.ASSUMED_DEPTH_MM
         
-        # --- 4. Kiểm tra chất lượng của ROI ---
-        if valid_depths.size < self.MIN_VALID_PIXELS:
-            return None, f"Ít điểm D ({valid_depths.size})"
-        
-        # Bỏ qua các bề mặt phẳng (ví dụ: tường, sàn)
-        if np.std(valid_depths) < self.MIN_STD_DEV:
-            return None, f"Nhiễu phẳng (std={np.std(valid_depths):.1f})"
-            
-        # --- 5. Tính toán và xác thực khoảng cách cuối cùng ---
-        median_depth = np.median(valid_depths)
-        
-        if not (self.MIN_DEPTH_MM < median_depth < self.MAX_DEPTH_MM):
-            return None, f"D không hợp lệ ({median_depth:.0f})"
-            
-        return median_depth, "OK"
+        # Vòng lặp tinh chỉnh (thường chỉ cần 1 lần là đủ)
+        for i in range(refine_steps + 1):
+            rgb_corners = np.array([[xmin, ymin], [xmax, ymax]], dtype=np.float32).reshape(-1, 1, 2)
+            try:
+                tof_corners = self._project_points_vectorized(rgb_corners, current_depth_mm)
+                if tof_corners is None:
+                    # Nếu chiếu thất bại ở bước tinh chỉnh, trả về kết quả từ bước trước đó (nếu có)
+                    return (current_depth_mm, "OK") if i > 0 else (None, "Lỗi chiếu")
+            except Exception as e:
+                logger.warning(f"Lỗi trong bước chiếu (lần {i}): {e}")
+                return (current_depth_mm, "OK") if i > 0 else (None, "Lỗi chiếu")
 
-    def project_rgb_box_to_tof(self, rgb_box: tuple, tof_depth_map: np.ndarray) -> tuple | None:
+            # Trích xuất ROI và lọc điểm
+            tof_xmin, tof_ymin = np.min(tof_corners, axis=0)
+            tof_xmax, tof_ymax = np.max(tof_corners, axis=0)
+            
+            h, w = tof_depth_map.shape
+            tx1, ty1 = max(0, int(tof_xmin)), max(0, int(tof_ymin))
+            tx2, ty2 = min(w, int(tof_xmax)), min(h, int(tof_ymax))
+            
+            if tx1 >= tx2 or ty1 >= ty2:
+                return None, "ROI ToF rỗng"
+
+            depth_roi = tof_depth_map[ty1:ty2, tx1:tx2]
+            valid_depths = depth_roi[depth_roi > 0]
+            
+            if valid_depths.size < self.MIN_VALID_PIXELS:
+                return None, f"Ít điểm D ({valid_depths.size})"
+
+            if np.std(valid_depths) < self.MIN_STD_DEV:
+                return None, f"Nhiễu phẳng (std={np.std(valid_depths):.1f})"
+            
+            # Cập nhật khoảng cách ước tính cho lần lặp tiếp theo
+            current_depth_mm = np.median(valid_depths)
+
+        # Sau khi tinh chỉnh, kiểm tra lại lần cuối
+        if not (self.MIN_DEPTH_MM < current_depth_mm < self.MAX_DEPTH_MM):
+            return None, f"D không hợp lệ ({current_depth_mm:.0f})"
+            
+        return current_depth_mm, "OK"
+
+    def project_rgb_box_to_tof(self, rgb_box: tuple, distance_mm: float, tof_depth_map_shape: tuple) -> tuple | None:
         """
-        Chiếu một bounding box từ RGB sang ToF để lấy box tương ứng, sử dụng khoảng cách đã được tính toán.
-        Hữu ích cho việc gỡ lỗi và hiển thị.
+        Chiếu box RGB sang ToF với một khoảng cách đã biết.
+        **Lưu ý:** Hàm này không tự tính lại khoảng cách.
         """
-        distance_mm, status = self.get_robust_distance(rgb_box, tof_depth_map)
-        if status != "OK":
-            logger.warning(f"Không thể chiếu box do không lấy được khoảng cách tin cậy: {status}")
+        if distance_mm is None:
             return None
 
         xmin, ymin, xmax, ymax = map(int, rgb_box)
@@ -155,8 +155,7 @@ class StereoProjector:
             logger.error(f"Lỗi khi chiếu chính xác các góc: {e}", exc_info=True)
             return None
 
-        # Tính toán hộp giới hạn trên ToF và đảm bảo nó nằm trong kích thước ảnh
-        tof_h, tof_w = tof_depth_map.shape
+        tof_h, tof_w = tof_depth_map_shape
         tof_xmin = max(0, int(np.min(tof_corners_projected[:, 0])))
         tof_ymin = max(0, int(np.min(tof_corners_projected[:, 1])))
         tof_xmax = min(tof_w, int(np.max(tof_corners_projected[:, 0])))
