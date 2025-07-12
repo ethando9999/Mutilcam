@@ -9,7 +9,7 @@ import cv2
 import math
 from rknn.api import RKNN
 
-from utils.logging_python_orangepi import get_logger
+from utils.logging_python_orangepi import get_logger 
 
 logger = get_logger(__name__)
 
@@ -17,14 +17,14 @@ logger = get_logger(__name__)
 CLASSES = ['person']
 
 pose_palette = np.array([[255, 128, 0], [255, 153, 51], [255, 178, 102], [230, 230, 0], [255, 153, 255],
-                         [153, 204, 255], [255, 102, 255], [255, 51, 255], [102, 178, 255], [51, 153, 255],
+                         [153, 204, 255], [255, 102, 255], [255, 51, 255], [102, 178, 255], [51, 153, 255], 
                          [255, 153, 153], [255, 102, 102], [255, 51, 51], [153, 255, 153], [102, 255, 102],
                          [51, 255, 51], [0, 255, 0], [0, 0, 255], [255, 0, 0], [255, 255, 255]], dtype=np.uint8)
 
 kpt_color = pose_palette[[16, 16, 16, 16, 16, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9]]
 skeleton = [[16, 14], [14, 12], [17, 15], [15, 13], [12, 13], [6, 12], [7, 13], [6, 7], [6, 8],
             [7, 9], [8, 10], [9, 11], [2, 3], [1, 2], [1, 3], [2, 4], [3, 5], [4, 6], [5, 7]]
-limb_color = pose_palette[[9, 9, 9, 9, 7, 7, 7, 0, 0, 0, 0, 0, 16, 16, 16, 16, 16, 16, 16]]
+limb_color = pose_palette[[9, 9, 9, 9, 7, 7, 7, 0, 0, 0, 0, 0, 16, 16, 16, 16, 16, 16, 16]] 
 
 core_mask = [RKNN.NPU_CORE_AUTO, RKNN.NPU_CORE_0, RKNN.NPU_CORE_1, RKNN.NPU_CORE_2, RKNN.NPU_CORE_0_1, RKNN.NPU_CORE_0_1_2, RKNN.NPU_CORE_ALL]
 
@@ -38,7 +38,7 @@ def letterbox_resize(image, size, bg_color):
         image = cv2.imread(image)
     target_width, target_height = size
     image_height, image_width, _ = image.shape
-    aspect_ratio = min(target_width / image_width, target_height / image_height)
+    aspect_ratio = min(target_width / image_width, target_height / image_height) 
     new_width = int(image_width * aspect_ratio)
     new_height = int(image_height * aspect_ratio)
     image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)

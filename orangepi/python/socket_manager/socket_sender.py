@@ -1,99 +1,88 @@
+# file: core/socket_sender.py (Phiên bản hoàn thiện - Sử dụng kết nối bền vững, mạnh mẽ)
+
 import asyncio
 import websockets
 import json
 import numpy as np
-from datetime import datetime
 from utils.logging_python_orangepi import get_logger
 
 logger = get_logger(__name__)
 
 def _numpy_converter(obj):
+    """Hàm helper để chuyển đổi các kiểu dữ liệu NumPy sang kiểu dữ liệu JSON."""
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     if isinstance(obj, (np.floating, np.integer)):
         return obj.item()
-    raise TypeError(f"{obj!r} is not JSON serializable")
-
+    if isinstance(obj, (np.bool_)):
+        return bool(obj)
+    raise TypeError(f"Đối tượng {obj!r} thuộc loại {type(obj).__name__} không thể chuyển đổi sang JSON")
 
 class Socket_Sender:
     """
-    Client class for sending packets to a WebSocket server.
+    Quản lý một kết nối WebSocket bền vững, mạnh mẽ. 
+    Tự động kết nối lại và xác minh kết nối trước mỗi lần gửi.
     """
-
     def __init__(self, server_uri: str):
         self.server_uri = server_uri
-        asyncio.create_task(self._test_connection())
+        self.websocket = None
+        self.lock = asyncio.Lock()
+        logger.info(f"Socket_Sender khởi tạo cho URI: {self.server_uri}")
 
-    async def _test_connection(self):
-        try:
-            async with websockets.connect(self.server_uri) as ws:
-                logger.info(f" Successfully connected to {self.server_uri}")
-        except Exception as e:
-            logger.error(f"[WARN] Failed to connect during init: {e}")
-
-    async def send_packets(self, packets: dict) -> str:
+    async def send_packets(self, packets: dict):
         """
-        Send a JSON packet to the WebSocket server and return the response.
+        Gửi dữ liệu một cách an toàn. Tự động xử lý mọi sự cố kết nối
+        và sẽ thử lại cho đến khi gửi tin nhắn thành công.
         """
-        try:
-            message = json.dumps(packets, indent=2, default=_numpy_converter)
+        message_to_send = json.dumps(packets, indent=2, default=_numpy_converter)
 
-            async with websockets.connect(self.server_uri) as ws:
-                await ws.send(message)
-                logger.info(f"SENT] {message}")
-                response = await ws.recv()
-                print(f"[RECV] {response}")
-                return response
+        async with self.lock:
+            while True:
+                # BƯỚC 1: Nếu chưa có kết nối, hãy tạo nó.
+                if self.websocket is None:
+                    try:
+                        self.websocket = await asyncio.wait_for(websockets.connect(self.server_uri), timeout=5.0)
+                        logger.info(f">>> Kết nối WebSocket thành công tới {self.server_uri}! <<<")
+                    except Exception as e:
+                        logger.error(f"Kết nối tới {self.server_uri} thất bại: {e}. Thử lại sau 3 giây.")
+                        self.websocket = None
+                        await asyncio.sleep(3)
+                        continue
 
-        except ConnectionRefusedError:
-            error_msg = f"[ERROR] Unable to connect to {self.server_uri}. Ensure the server is running."
-            print(error_msg)
-            return error_msg
-        except Exception as e:
-            error_msg = f"[ERROR] Unexpected error: {e}"
-            print(error_msg)
-            return error_msg
+                # BƯỚC 2: Nếu đã có kết nối, thử sử dụng nó.
+                try:
+                    await asyncio.wait_for(self.websocket.ping(), timeout=2.0)
+                    await self.websocket.send(message_to_send)
+                    logger.info(f"✅ Đã gửi tới {self.server_uri}:\n{message_to_send}")
+                    # Nếu cần nhận phản hồi, bỏ comment dòng dưới
+                    # response = await self.websocket.recv() 
+                    return # Thoát khỏi vòng lặp nếu gửi thành công 
+
+                # BƯỚC 3: Nếu có lỗi, kết nối đã hỏng.
+                except Exception as e:
+                    logger.warning(f"Kết nối tới {self.server_uri} có vấn đề ({type(e).__name__}). Đóng và tạo lại...")
+                    try: 
+                        await self.websocket.close() 
+                    except:
+                        pass
+                    self.websocket = None
 
 async def start_socket_sender(id_socket_queue: asyncio.Queue, server_uri: str):
     """
-    Start a background task that continuously sends packets from the queue.
+    Worker lắng nghe hàng đợi và gửi gói tin đi. 
     """
     sender = Socket_Sender(server_uri)
+    
     while True:
-        packets = await id_socket_queue.get()
-        logger.info(f"[LOG]✅✅✅ send packet to {server_uri}: {packets}")
-        response = await sender.send_packets(packets)
-        logger.info(f"[LOG] Server response for packet: {response}")
-        id_socket_queue.task_done()
+        try:
+            packet = await id_socket_queue.get()
+            if packet is None: break
+            
+            asyncio.create_task(sender.send_packets(packet))
+            id_socket_queue.task_done()
 
-async def main():
-    # Example usage
-    id_queue = asyncio.Queue()
-    server_uri = "ws://192.168.1.208:3000/ws"
-
-    # Start background sender
-    asyncio.create_task(start_id_sender(id_queue, server_uri))
-
-    # Simulate enqueueing a packet
-    example_packet = {
-        "frame_id": 1001,
-        "person_id": 1234,
-        "gender": "male",
-        "race": "asian",
-        "age": "Adult",
-        "height": 1.72,
-        "time_detect": datetime.now().isoformat(),
-        "camera_id": "001",
-        "point3D": [450.5, 320.0, 1.8]
-    }
-    await id_queue.put(example_packet)
-
-    await asyncio.sleep(2)  # Wait for packet to be processed
-
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        print(f"[INFO] Expected error in simulation: {e}")
+        except asyncio.CancelledError:
+            logger.info(f"Sender worker cho {server_uri} bị hủy.")
+            break
+        except Exception as e:
+            logger.error(f"Lỗi không mong muốn trong sender worker {server_uri}: {e}", exc_info=True)
