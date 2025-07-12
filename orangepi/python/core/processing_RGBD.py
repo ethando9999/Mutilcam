@@ -20,32 +20,31 @@ import time
 logger = get_logger(__name__) 
 
 class FrameProcessor:
-    """
-    Xử lý các lô frame RGB-D, từ phát hiện người cho đến trích xuất thông tin chi tiết.
-    Phiên bản này được tối ưu để hoạt động ổn định và hiệu quả trên thiết bị biên.
-    """
-    def __init__(self, batch_size: int = 3):
+    # <<< SỬA LỖI: Thêm các queue vào __init__ để nhất quán >>>
+    def __init__(self, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue, batch_size: int = 3):
         """
-        Khởi tạo tất cả các module cần thiết cho việc xử lý.  
+        Khởi tạo tất cả các module cần thiết cho việc xử lý.
         """
         self.detector = HumanDetection()
         self.pose_processor = PoseColorSignatureExtractor() 
-        self.stereo_projector = StereoProjector()  
-        self.table_id = 1
+        self.stereo_projector = StereoProjector()
         
-        mtx_rgb = self.stereo_projector.params.get('mtx_rgb') 
+        # <<< Thêm các queue vào thuộc tính của lớp >>>
+        self.people_count_queue = people_count_queue
+        self.height_queue = height_queue
+        self.table_id = config.OPI_CONFIG.get("SOCKET_TABLE_ID", 1) # Lấy table_id từ config
+
+        # ... (phần còn lại của __init__ giữ nguyên)
+        mtx_rgb = self.stereo_projector.params.get('mtx_rgb')
         if mtx_rgb is None:
             raise ValueError("mtx_rgb không có trong file hiệu chỉnh.")
         self.height_estimator = HeightEstimator(mtx_rgb)
-        
-        # Giới hạn số lượng người được xử lý song song để tránh quá tải
         self.semaphore = asyncio.Semaphore(4)
-        self.batch_size = batch_size 
-        
+        self.batch_size = batch_size
         self.debug_dir = os.path.join(config.OPI_CONFIG.get("results_dir", "results_tof"))
         os.makedirs(self.debug_dir, exist_ok=True)
         logger.info("[DEBUG] Ảnh debug sẽ lưu vào: %s", self.debug_dir)
-        logger.info("FrameProcessor (Tối ưu Toàn diện) đã được khởi tạo.")
+        logger.info("FrameProcessor (Tích hợp Websocket) đã được khởi tạo.")
 
     async def process_body_color_async(self, frame, keypoints):
         """Xử lý màu sắc cơ thể bất đồng bộ."""
@@ -211,126 +210,150 @@ class FrameProcessor:
                 logger.error(f"Lỗi xử lý người cho frame {frame_id}: {e}", exc_info=True)
                 return None
 
-    async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue):
-        frame_number = 0
-        while True:
-            batch_data_paths = []
+async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue):
+    """
+    Vòng lặp chính: Lấy dữ liệu từ hàng đợi, điều phối tác vụ xử lý một cách tối ưu.
+    """
+    frame_number = 0
+    while True:
+        # ====================================================================
+        # BƯỚC 1: LẤY VÀ ĐỌC DỮ LIỆU BATCH FRAME
+        # ====================================================================
+        batch_data_paths = []
+        try:
+            item = await asyncio.wait_for(frame_queue.get(), timeout=5.0)
+            if item is None: break
+            batch_data_paths.append(item); frame_queue.task_done()
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            continue
+
+        while len(batch_data_paths) < self.batch_size:
             try:
-                item = await asyncio.wait_for(frame_queue.get(), timeout=5.0)
+                item = frame_queue.get_nowait()
                 if item is None:
-                    break
-                batch_data_paths.append(item)
-                frame_queue.task_done()
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                continue
+                    frame_queue.put_nowait(None); break
+                batch_data_paths.append(item); frame_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        if not batch_data_paths: continue
 
-            while len(batch_data_paths) < self.batch_size:
+        try:
+            # Tải dữ liệu frame từ file
+            loaded_data_map = {}
+            frames_for_detection = []
+            for i, (rgb_path, depth_path, amp_path) in enumerate(batch_data_paths):
                 try:
-                    item = frame_queue.get_nowait()
-                    if item is None:
-                        frame_queue.put_nowait(None)
-                        break
-                    batch_data_paths.append(item)
-                    frame_queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
+                    rgb_frame = cv2.imread(rgb_path)
+                    depth_frame = np.load(depth_path) if depth_path and os.path.exists(depth_path) else None
+                    if rgb_frame is not None and depth_frame is not None:
+                        frames_for_detection.append(rgb_frame)
+                        loaded_data_map[i] = (rgb_frame, depth_frame)
+                except Exception as e:
+                    logger.error(f"Lỗi khi đọc file dữ liệu {rgb_path}: {e}")
+            if not frames_for_detection: continue
 
-            if not batch_data_paths:
-                continue
+            # ====================================================================
+            # BƯỚC 2: PHÁT HIỆN NGƯỜI TRONG BATCH (SONG SONG)
+            # ====================================================================
+            detection_results = await asyncio.gather(
+                *[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection],
+                return_exceptions=True
+            )
 
-            try:
-                loaded_data_map = {}
-                frames_for_detection = []
-                for i, (rgb_path, depth_path, amp_path) in enumerate(batch_data_paths):
-                    try:
-                        rgb_frame = cv2.imread(rgb_path)
-                        depth_frame = np.load(depth_path) if depth_path and os.path.exists(depth_path) else None
-                        if rgb_frame is not None and depth_frame is not None:
-                            frames_for_detection.append(rgb_frame)
-                            loaded_data_map[i] = (rgb_frame, depth_frame)
-                    except Exception as e:
-                        logger.error(f"Lỗi khi đọc file dữ liệu {rgb_path}: {e}")
-                if not frames_for_detection:
+            # ====================================================================
+            # BƯỚC 3: LỌC SƠ BỘ VÀ TÍNH KHOẢNG CÁCH (SONG SONG)
+            # ====================================================================
+            # Tạo một danh sách phẳng chứa tất cả các phát hiện hợp lệ từ tất cả các frame trong batch
+            potential_detections = []
+            for i, detection_result in enumerate(detection_results):
+                if not detection_result or isinstance(detection_result, Exception):
                     continue
-
-                detection_results = await asyncio.gather(*[
-                    self._run_in_executor(self.detector.run_detection, f)
-                    for f in frames_for_detection
-                ], return_exceptions=True)
-
-                per_frame_counts = []
-                all_human_tasks = []
-                all_valid_heights_cm = []
-
-                for i, detection_result in enumerate(detection_results):
-                    if not detection_result or isinstance(detection_result, Exception):
-                        per_frame_counts.append(0)
-                        continue
-
-                    keypoints_data, boxes_data = detection_result
-                    original_rgb, original_depth = loaded_data_map[i]
-
-                    distance_tasks = []
-                    valid_detections_info = []
-                    for kpts, box in zip(keypoints_data, boxes_data):
-                        if not self._is_detection_valid(box, kpts, original_rgb.shape):
-                            continue
-                        torso_box = get_torso_box(kpts, box)
-                        distance_tasks.append(
-                            self._run_in_executor(self.stereo_projector.get_robust_distance, torso_box, original_depth)
-                        )
-                        valid_detections_info.append((box, kpts))
-
-                    distance_results = await asyncio.gather(*distance_tasks, return_exceptions=True)
-
-                    valid_count_this_frame = 0
-                    for idx, res in enumerate(distance_results):
-                        if isinstance(res, Exception):
-                            continue
-                        distance_mm, status = res
-                        if status != "OK" or distance_mm is None or not (500 < distance_mm < 3500):
-                            continue
-
-                        valid_count_this_frame += 1
-                        box, kpts = valid_detections_info[idx]
-                        all_human_tasks.append(
-                            self.process_human_async(
-                                frame_number + i,
-                                original_rgb,
-                                original_depth,
-                                box,
-                                kpts,
-                                precomputed_distance_mm=distance_mm
-                            )
-                        )
-
-                    per_frame_counts.append(valid_count_this_frame)
-
-                max_person_count = max(per_frame_counts) if per_frame_counts else 0
-                await people_count_queue.put({"total_person": max_person_count})
-
-                if all_human_tasks:
-                    processing_results = await asyncio.gather(*all_human_tasks, return_exceptions=True)
-                    for result in processing_results:
-                        if result and not isinstance(result, Exception):
-                            result["camera_id"] = config.OPI_CONFIG.get("device_id", "opi_01")
-                            height_m = result.get("est_height_m")
-                            if height_m is not None:
-                                height_cm = height_m * 100.0
-                                all_valid_heights_cm.append(height_cm)
-                            await processing_queue.put(result)
-
-                    await height_queue.put({"table_id": self.table_id, "heights_cm": all_valid_heights_cm})
-
-                frame_number += len(frames_for_detection)
-
-            except Exception as e:
-                logger.error(f"Lỗi không mong muốn trong xử lý lô: {e}", exc_info=True)
                 
+                keypoints_data, boxes_data = detection_result
+                original_rgb, original_depth = loaded_data_map[i]
+                
+                for kpts, box in zip(keypoints_data, boxes_data):
+                    if self._is_detection_valid(box, kpts, original_rgb.shape):
+                        potential_detections.append({
+                            "frame_idx": i, "rgb": original_rgb, "depth": original_depth, 
+                            "box": box, "kpts": kpts
+                        })
+
+            # Tính khoảng cách song song cho tất cả các phát hiện tiềm năng
+            distance_tasks = [
+                self._run_in_executor(self.stereo_projector.get_robust_distance, get_torso_box(det["kpts"], det["box"]), det["depth"])
+                for det in potential_detections 
+            ]
+            distance_results = await asyncio.gather(*distance_tasks, return_exceptions=True)
+
+            # ====================================================================
+            # BƯỚC 4: TẠO TÁC VỤ XỬ LÝ CHI TIẾT CHO CÁC PHÁT HIỆN HỢP LỆ
+            # ====================================================================
+            all_human_tasks = []
+            valid_detections_per_frame = [0] * len(frames_for_detection)
+
+            for i, det_info in enumerate(potential_detections):
+                distance_res = distance_results[i]
+                if isinstance(distance_res, Exception): continue
+                
+                distance_mm, status = distance_res
+                if status == "OK" and distance_mm and (500 < distance_mm < 3500):
+                    # Tăng bộ đếm cho frame tương ứng
+                    valid_detections_per_frame[det_info["frame_idx"]] += 1
+                    
+                    # Tạo tác vụ xử lý sâu
+                    all_human_tasks.append(
+                        self.process_human_async(
+                            frame_id=frame_number + det_info["frame_idx"],
+                            rgb_frame=det_info["rgb"],
+                            tof_depth_map=det_info["depth"],
+                            box=det_info["box"],
+                            keypoints=det_info["kpts"],
+                            precomputed_distance_mm=distance_mm
+                        )
+                    )
+
+            # ====================================================================
+            # BƯỚC 5: THU THẬP KẾT QUẢ VÀ GỬI DỮ LIỆU
+            # ====================================================================
+            # Gửi tổng số người (lấy số lượng lớn nhất trong các frame của batch)
+            max_person_count = max(valid_detections_per_frame) if valid_detections_per_frame else 0
+            count_packet = {"total_person": max_person_count}
+            asyncio.create_task(people_count_queue.put(count_packet))
+
+            if all_human_tasks:
+                final_results = await asyncio.gather(*all_human_tasks, return_exceptions=True)
+                
+                # Lọc ra các kết quả cuối cùng hợp lệ
+                valid_final_results = [res for res in final_results if res and not isinstance(res, Exception)]
+
+                if valid_final_results:
+                    # Gửi danh sách chiều cao
+                    heights_cm = [res.get("est_height_m", 0) * 100.0 for res in valid_final_results]
+                    height_packet = {"table_id": self.table_id, "heights_cm": heights_cm}
+                    asyncio.create_task(height_queue.put(height_packet))
+                    
+                    # Gửi từng kết quả chi tiết vào queue ReID
+                    for result in valid_final_results:
+                        result["camera_id"] = config.OPI_CONFIG.get("device_id", "opi_01")
+                        await processing_queue.put(result)
+
+            frame_number += len(frames_for_detection)
+
+        except Exception as e:
+            logger.error(f"Lỗi không mong muốn trong xử lý lô: {e}", exc_info=True)
+                
+# <<< SỬA LỖI: Hàm start_processor nhận queue và truyền vào FrameProcessor >>>
 async def start_processor(frame_queue: asyncio.Queue, processing_queue: asyncio.Queue, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue):
-    logger.info("Khởi động worker xử lý (Phiên bản cuối cùng)...")
+    logger.info("Khởi động worker xử lý...")
     try:
-        processor = FrameProcessor(batch_size=2)
-        await processor.process_frame_queue(frame_queue, processing_queue, people_count_queue, height_queue)
+        # Truyền các queue vào constructor của FrameProcessor
+        processor = FrameProcessor(
+            people_count_queue=people_count_queue,
+            height_queue=height_queue,
+            batch_size=2
+        )
+        # Gọi process_frame_queue với các queue cần thiết cho luồng chính
+        await processor.process_frame_queue(frame_queue, processing_queue)
     except Exception as e:
-        logger.error(f"Lỗi nghiêm trọng trong start_processor: {e}", exc_info=True) 
+        logger.error(f"Lỗi nghiêm trọng trong start_processor: {e}", exc_info=True)
