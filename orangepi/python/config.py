@@ -30,19 +30,19 @@ OPI_CONFIG = {
     "tcp_port": 5005,
     "rgb_camera_id": 1,
     "rgb_device_path": "/dev/rgb_cam", 
-    "rgb_resolution": (640, 480),
+    "rgb_resolution": (640, 480), 
     "rgb_framerate": 15,
 
     # --- Cấu hình cho Processor (processing_RGBD.py) ---
     "model_path": os.path.join(BASE_DIR, "models", "yolov8_pose.rknn"),
     "calib_file_path": os.path.join(BASE_DIR, "depth_processing/cali_result", "0.9305.npz"),
-    "results_dir": os.path.join(BASE_DIR, "results"),
+    "results_dir": os.path.join(BASE_DIR, "results_tof"),
     "distance_threshold_m": 4.0, # Ngưỡng khoảng cách 4 mét
 
     # --- CẤU HÌNH WEBSOCKET (TÁCH BIỆT) ---
     "SOCKET_HEIGHT_URI": "ws://192.168.1.168:8080/api/ws/camera",
-    "SOCKET_COUNT_URI": "ws://192.168.1.108:8080/api/ws/camera", # Giả định port và path tương tự
-    "SOCKET_ID_URI": "ws://192.168.1.108:9090/api/ws/camera",
+    "SOCKET_COUNT_URI": "ws://192.168.1.128:8080/api/ws/camera", # Giả định port và path tương tự
+    "SOCKET_ID_URI": "ws://192.168.1.128:9090/api/ws/camera",
     "SOCKET_TABLE_ID": 1,
     # ----------------------------------------
 

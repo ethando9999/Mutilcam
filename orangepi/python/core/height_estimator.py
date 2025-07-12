@@ -13,7 +13,7 @@ class HeightEstimator:
         self.cx, self.cy = mtx_rgb[0, 2], mtx_rgb[1, 2]
         
         # --- CÁC HẰNG SỐ CẤU HÌNH ---
-        self.MINIMUM_DISTANCE = 1.2
+        self.MINIMUM_DISTANCE = 0.5
         self.ANKLE_TO_FLOOR_COMPENSATION = 0.08
         self.KNEE_TO_FLOOR_COMPENSATION = 0.45 
         self.TORSO_TO_HEIGHT_RATIO = 3.5
@@ -22,7 +22,7 @@ class HeightEstimator:
         logger.info(f"HeightEstimator initialized. Method: Hierarchical 3D Projection (v20). Min_Dist: {self.MINIMUM_DISTANCE}m")
 
     def _project_to_3d(self, point_2d, distance_m):
-        """Chiếu một điểm ảnh 2D thành điểm 3D với một khoảng cách cho trước."""
+        """Chiếu một điểm ảnh 2D thành điểm 3D với một khoảng cách cho trước.""" 
         u, v = point_2d
         X = (u - self.cx) * distance_m / self.fx
         Y = (v - self.cy) * distance_m / self.fy 
@@ -50,14 +50,14 @@ class HeightEstimator:
             logger.debug(f"H tính từ '{method_name}' hợp lệ: {height_m:.2f}m")
             return height_m, method_name
         
-        logger.warning(f"H từ '{method_name}' ({height_m:.2f}m) không hợp lệ.")
+        logger.warning(f"H từ '{method_name}' ({height_m:.2f}m) không hợp lệ.") 
         return None, None
 
     def estimate(self, keypoints, distance_m):
         """
-        Ước tính chiều cao bằng phương pháp chiếu 3D phân tầng theo bằng chứng.
+        Ước tính chiều cao bằng phương pháp chiếu 3D phân tầng theo bằng chứng. 
         """
-        if not (distance_m and self.MINIMUM_DISTANCE <= distance_m < 8.0):
+        if not (distance_m and self.MINIMUM_DISTANCE <= distance_m < 4.0):
             return None, f"D:Ngoài vùng ({distance_m:.1f}m)"
 
         # Định nghĩa các nhóm keypoint
@@ -67,7 +67,7 @@ class HeightEstimator:
         SHOULDER_KPS = [5, 6]
         HIP_KPS = [11, 12]
 
-        head_kpts = self._get_valid_kpts(keypoints, HEAD_KPS)
+        head_kpts = self._get_valid_kpts(keypoints, HEAD_KPS) 
         
         # --- Ưu tiên 1: Dựa vào Mắt cá chân ---
         ankle_kpts = self._get_valid_kpts(keypoints, ANKLE_KPS)
@@ -78,7 +78,7 @@ class HeightEstimator:
             if height: return height, method
 
         # --- Ưu tiên 2: Dựa vào Đầu gối ---
-        knee_kpts = self._get_valid_kpts(keypoints, KNEE_KPS)
+        knee_kpts = self._get_valid_kpts(keypoints, KNEE_KPS) 
         if head_kpts.size > 0 and knee_kpts.size > 0:
             height, method = self._calculate_and_validate_height(
                 head_kpts, knee_kpts, distance_m, self.KNEE_TO_FLOOR_COMPENSATION, "Đầu gối"
@@ -88,7 +88,7 @@ class HeightEstimator:
         # --- Ưu tiên 3: Dựa vào Tỷ lệ thân ---
         shoulder_kpts = self._get_valid_kpts(keypoints, SHOULDER_KPS)
         hip_kpts = self._get_valid_kpts(keypoints, HIP_KPS)
-        if shoulder_kpts.shape[0] == 2 and hip_kpts.shape[0] == 2:
+        if shoulder_kpts.shape[0] == 2 and hip_kpts.shape[0] == 2: 
             shoulder_mid = np.mean(shoulder_kpts, axis=0)
             hip_mid = np.mean(hip_kpts, axis=0)
             torso_len_m = np.linalg.norm(self._project_to_3d(shoulder_mid, distance_m) - self._project_to_3d(hip_mid, distance_m))

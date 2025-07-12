@@ -31,7 +31,7 @@ class FramePutter:
                 logger.error(f"Không thể tạo thư mục {frame_dir}: Permission denied")
                 raise
         elif not os.access(frame_dir, os.W_OK):
-            logger.error(f"Thư mục {frame_dir} không thể ghi")
+            logger.error(f"Thư mục {frame_dir} không thể ghi") 
             raise PermissionError(f"Thư mục {frame_dir} không thể ghi")
         else:
             shutil.rmtree(frame_dir)

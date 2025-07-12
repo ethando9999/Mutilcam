@@ -32,7 +32,7 @@ def is_valid_kpt(point):
     return point is not None and point[0] > 0 and point[1] > 0
 
 def get_head_center(keypoints: list):
-    """Lấy vị trí của mũi. Nếu không có, tính trung tâm các điểm khác trên đầu."""
+    """Lấy vị trí của mũi. Nếu không có, tính trung tâm các điểm khác trên đầu.""" 
     if is_valid_kpt(keypoints[NOSE_IDX]):
         return tuple(map(int, keypoints[NOSE_IDX][:2]))
     

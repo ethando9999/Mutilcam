@@ -1,4 +1,4 @@
-from utils.yolo_pose_rknn import HumanDetection, core_mask
+from utils.yolo_pose import HumanDetection
 # from utils.logging_python_orangepi import setup_logging, get_logger
 import cv2 
 import os
@@ -7,11 +7,9 @@ import time # Thêm thư viện time để có thể thêm độ trễ nếu c�
 # setup_logging()
 
 if __name__ == '__main__':
-    target = "rk3588"
-    core_mask = core_mask[1]
 
     # Tạo instance của class
-    detector = HumanDetection(target, core_mask)
+    detector = HumanDetection()
     
     # Tạo thư mục nếu chưa tồn tại
     output_dir = "human_output"
@@ -31,17 +29,19 @@ if __name__ == '__main__':
             if not ret:
                 print("Không thể đọc frame từ video. Kết thúc.") 
                 break
-
+            start = time.time()
             # Thực hiện phát hiện trên mỗi frame
-            predbox = detector.detect(frame)
+            keypoints_data, boxes_data = detector.run_detection(frame)
+            fps = 1 / (time.time() - start)
+            print(f"Features shape: {frame.shape}, FPS: {fps:.2f}")           
             
             # Chỉ thực hiện vẽ và lưu nếu có đối tượng được phát hiện
-            if predbox: # Điều kiện này đúng khi danh sách predbox không rỗng
+            if boxes_data: # Điều kiện này đúng khi danh sách predbox không rỗng
                 saved_frame_count += 1
-                print(f"Phát hiện {len(predbox)} đối tượng! Đang lưu ảnh số {saved_frame_count}...")
+                print(f"Phát hiện {len(boxes_data)} đối tượng! Đang lưu ảnh số {saved_frame_count}...") 
                 
                 # Vẽ kết quả lên frame gốc
-                img_with_results = detector.draw_results(frame, predbox)
+                img_with_results = detector.draw_boxes_and_edges()
                 
                 # Lưu hình ảnh có kết quả
                 save_path = os.path.join(output_dir, f"result_rknn_{saved_frame_count}.jpg")

@@ -10,7 +10,8 @@ logger = get_logger(__name__)
 current_path = os.getcwd()
 
 
-MODEL_PATH = "models/yolo11n-pose_ncnn_model"
+# MODEL_PATH = "models/yolo11n-pose_ncnn_model"
+MODEL_PATH = "models/yolo11s-pose_rknn_model"
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), MODEL_PATH)
 
@@ -63,7 +64,7 @@ class HumanDetection:
             verbose=False,
             classes=self.classes,
             # device=self.device,
-            conf=0.4,
+            conf=0.5,
             iou=0.4 
         )
         self.results = results[0] 

@@ -86,8 +86,8 @@ async def main(args):
     frame_queue = asyncio.Queue(maxsize=100)
     processing_queue = asyncio.Queue(maxsize=1000)
     id_socket_queue = asyncio.Queue()
-    people_count_queue = asyncio.Queue()
-    height_queue = asyncio.Queue()
+    people_count_queue = asyncio.Queue(maxsize=1)
+    height_queue = asyncio.Queue(maxsize=1)
 
 
     # --- CẬP NHẬT PHẦN KHỞI TẠO PersonReID ---
@@ -121,7 +121,7 @@ async def main(args):
         person_reid_instance = person_reid
         all_tasks.append(asyncio.create_task(start_putter(frame_queue, camera_id)))
         all_tasks.append(asyncio.create_task(start_processor(frame_queue, processing_queue, people_count_queue, height_queue)))
-        all_tasks.append(asyncio.create_task(start_id(processing_queue, person_reid_instance)))
+        all_tasks.append(asyncio.create_task(start_id(processing_queue, person_reid_instance))) 
 
         ### <<< THAY ĐỔI 3: THÊM CÁC TASK MỚI VÀO VÒNG LẶP SỰ KIỆN >>> ###
         all_tasks.append(asyncio.create_task(start_socket_sender(id_socket_queue, ID_CONFIG.get("SOCKET_ID_URI"))))

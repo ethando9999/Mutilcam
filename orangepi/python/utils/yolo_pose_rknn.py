@@ -30,8 +30,8 @@ core_mask = [RKNN.NPU_CORE_AUTO, RKNN.NPU_CORE_0, RKNN.NPU_CORE_1, RKNN.NPU_CORE
 
 MODEL_PATH = "python/models/yolov8n-pose.rknn" 
 
-nmsThresh = 0.35
-objectThresh = 0.65
+nmsThresh = 0.5
+objectThresh = 0.75
 
 def letterbox_resize(image, size, bg_color):
     if isinstance(image, str):
