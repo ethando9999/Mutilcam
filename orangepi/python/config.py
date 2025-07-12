@@ -34,7 +34,7 @@ OPI_CONFIG = {
 
     # --- Cấu hình cho Processor (processing_RGBD.py) ---
     "model_path": os.path.join(os.path.dirname(BASE_DIR), "models", "yolov8_pose.rknn"),
-    "calib_file_path": os.path.join(os.path.dirname(BASE_DIR), "python/track_local/data", "calib_v2.npz"), 
+    "calib_file_path": os.path.join(os.path.dirname(BASE_DIR), "python/track_local/data", "calib_v3.npz"), 
     "results_dir": os.path.join(os.path.dirname(BASE_DIR), "results"),
     "distance_threshold_m": 4.0, # Ngưỡng khoảng cách 4 mét
 
@@ -55,7 +55,7 @@ RPI_CONFIG = {
 } 
 
 FACE_CONFIG = {
-    "face_detection_conf": 0.9, 
+    "face_detection_conf": 0.9,  
     "race_conf": 0.85,
     "gender_conf": 0.9,
     "age_conf":0.85,
