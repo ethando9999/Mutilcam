@@ -65,23 +65,28 @@ class StereoProjector:
     def _project_points_vectorized(self, rgb_points_2d: np.ndarray, depth_mm: float) -> np.ndarray | None:
         """
         Chiếu một mảng các điểm 2D từ hệ RGB sang hệ ToF bằng phép tính vector hóa.
-        Nhanh hơn đáng kể so với việc lặp qua từng điểm.
         """
         # 1. Undistort điểm RGB
-        undistorted_points = cv2.undistortPoints(rgb_points_2d, self.mtx_rgb, self.dist_rgb, None, self.mtx_rgb)
-        
-        # 2. Chiếu điểm 2D undistorted ra 3D
-        u_v = undistorted_points.reshape(-1, 2)
-        x_3d = (u_v[:, 0] - self.cx_rgb) * depth_mm / self.fx_rgb
-        y_3d = (u_v[:, 1] - self.cy_rgb) * depth_mm / self.fy_rgb
-        
-        points_3d = np.stack([x_3d, y_3d, np.full_like(x_3d, depth_mm)], axis=-1)
+        pts_undist = cv2.undistortPoints(rgb_points_2d, self.mtx_rgb, self.dist_rgb, P=self.mtx_rgb).reshape(-1, 2)
+
+        # 2. Chiếu ngược về không gian 3D
+        pts_3d = self._back_project_rgb_to_3d(pts_undist, depth_mm)
 
         # 3. Chiếu điểm 3D vào mặt phẳng ảnh ToF
-        tof_points_2d, _ = cv2.projectPoints(points_3d, self.R, self.T, self.mtx_tof, self.dist_tof)
-        
-        return tof_points_2d.reshape(-1, 2) if tof_points_2d is not None else None
+        proj_2d, _ = cv2.projectPoints(pts_3d, self.R, self.T, self.mtx_tof, self.dist_tof)
+        return proj_2d.reshape(-1, 2) if proj_2d is not None else None
 
+
+    def _back_project_rgb_to_3d(self, pts_undist: np.ndarray, depth: float) -> np.ndarray:
+        """
+        Chiếu các điểm undistorted RGB 2D ra không gian 3D (hệ RGB).
+        """
+        u, v = pts_undist[:, 0], pts_undist[:, 1]
+        x = (u - self.cx_rgb) * depth / self.fx_rgb
+        y = (v - self.cy_rgb) * depth / self.fy_rgb
+        z = np.full_like(x, depth)
+        return np.stack((x, y, z), axis=-1)
+    
     def get_robust_distance(self, rgb_box: tuple, tof_depth_map: np.ndarray, refine_steps: int = 1) -> tuple[float | None, str]:
         """
         Ước tính khoảng cách đáng tin cậy và có thể tinh chỉnh lặp lại để tăng độ chính xác.

@@ -139,8 +139,12 @@ class FrameProcessor:
                     debug_base_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S%f')}_F{frame_id}"
                     asyncio.create_task(self.save_debug_images(debug_base_name, rgb_frame.copy(), tof_depth_map.copy(), box, tof_box_projected))
 
-                head_center_kp = get_head_center(keypoints)
-                head_point_3d = (head_center_kp[0], head_center_kp[1], distance_mm) if head_center_kp else None
+                head_kp = get_head_center(keypoints)
+                world_point_3d = None
+                if head_kp is not None:
+                    head_kp = np.array(head_kp, dtype=np.float32).reshape(1, 2)
+                    head_kp_3d = self.stereo_projector._back_project_rgb_to_3d(head_kp, distance_mm)
+                    world_point_3d = head_kp_3d[0]
                 
                 logger.info(f"✅✅ Xử lý hoàn tất: Khoảng cách={distance_m:.2f}m, Chiều cao={est_height_m:.2f}m ({height_status})")
 
@@ -148,7 +152,7 @@ class FrameProcessor:
                     "frame_id": frame_id, 
                     "human_box": human_box_img, 
                     "body_parts": body_parts_boxes,
-                    "head_point_3d": head_point_3d, 
+                    "head_point_3d": world_point_3d, 
                     "bbox": box, "map_keypoints": keypoints,
                     "distance_mm": distance_mm, 
                     "est_height_m": est_height_m, 
