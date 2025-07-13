@@ -27,7 +27,7 @@ OPI_CONFIG = {
     # --- Cấu hình Producer ---
     "slave_ip": "192.168.100.2",
     "tcp_port": 5005,
-    "rgb_camera_id": 0,
+    "rgb_camera_id": 1,
     "rgb_device_path": "/dev/rgb_cam",
     "rgb_resolution": (640, 480),
     "rgb_framerate": 15,
