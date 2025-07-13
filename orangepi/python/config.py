@@ -25,7 +25,7 @@ OPI_CONFIG = {
     "db_path": os.path.join(os.path.dirname(BASE_DIR), "database", "database_opi.db"),
 
     # --- Cấu hình Producer ---
-    "slave_ip": "192.168.100.2",
+    "slave_ip": "192.168.100.2", 
     "tcp_port": 5005,
     "rgb_camera_id": 1,
     "rgb_device_path": "/dev/rgb_cam",
@@ -61,8 +61,8 @@ RPI_CONFIG = {
 } 
 
 FACE_CONFIG = {
-    "face_detection_conf": 0.7, 
-    "race_conf": 0.5,
-    "gender_conf": 0.5,
-    "age_conf":0.8,
+    "face_detection_conf": 0.1,  
+    "race_conf": 0.1,
+    "gender_conf": 0.1,
+    "age_conf":0.1,
 }

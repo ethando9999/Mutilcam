@@ -137,7 +137,7 @@ class FramePutter:
     async def put_frames_queue(self, frame_queue: asyncio.Queue):
         loop = asyncio.get_running_loop()
         # Sử dụng camera ID được truyền vào
-        cap = cv2.VideoCapture(0) 
+        cap = cv2.VideoCapture(self.rgb_camera_id) 
         if not cap.isOpened():
             logger.error(f"❌ Không mở được camera RGB với ID: {self.rgb_camera_id}")
             return

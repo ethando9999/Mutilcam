@@ -1,5 +1,5 @@
 WATCH_DIR="orangepi"  # Đường dẫn đến thư mục cần đồng bộ
-DEST="ubuntu@192.168.1.161:~/orangepi/"  # Thư mục đích trên OrangePi
+DEST="ubuntu@192.168.1.161:~/orangepi2/"  # Thư mục đích trên OrangePi
 
 while inotifywait -e close_write -r "$WATCH_DIR"; do
     # Đồng bộ thư mục tới OrangePi, bao gồm .env

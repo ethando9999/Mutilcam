@@ -39,7 +39,7 @@ class HeightEstimator:
         top_point_2d = np.mean(top_kpts, axis=0)
         bottom_point_2d = np.mean(bottom_kpts, axis=0)
         
-        point_3d_top = self._project_to_3d(top_point_2d, distance_m)
+        point_3d_top = self._project_to_3d(top_point_2d, distance_m) 
         point_3d_bottom = self._project_to_3d(bottom_point_2d, distance_m)
         
         # Khoảng cách 3D giữa hai điểm trung bình

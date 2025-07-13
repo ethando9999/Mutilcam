@@ -493,7 +493,8 @@ class PersonReID:
                             logger.warning(f"Empty head_crop at {head_bbox}")
                     else:
                         logger.warning(f"Invalid head_bbox: {head_bbox}")
- 
+
+                logger.warning(f"Khong co head_bbox.")
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 feature_person = results[0]
                 if isinstance(feature_person, Exception):

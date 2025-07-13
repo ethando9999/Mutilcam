@@ -12,8 +12,9 @@ import time
 import cv2
 import os
 import glob
+import datetime
 
-from config import FACE_CONFIG
+from config import FACE_CONFIG, OPI_CONFIG
 
 class FaceAnalyze:
     def __init__(self):
@@ -80,6 +81,30 @@ class FaceAnalyze:
 
         return self.face_aligner.aligning(roi, padding=padding)
 
+    async def save_face_chip_async(self, face_chip, base_name: str = None):
+        """
+        Lưu ảnh face_chip bất đồng bộ vào thư mục 'face_chip'.
+
+        Args:
+            face_chip (np.ndarray): Ảnh khuôn mặt đã căn chỉnh.
+            base_name (str, optional): Tên file cơ sở. Nếu không có, sẽ tự tạo theo timestamp.
+        """
+        if face_chip is None:
+            logger.warning("Cannot save face_chip: image is None")
+            return
+
+        def _save():
+            face_dir = "face_chip"
+            save_dir = os.path.join(OPI_CONFIG.get("results_dir"), face_dir)
+            print("save_dir", save_dir)
+            os.makedirs(save_dir, exist_ok=True)
+            name = base_name or f"face_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+            path = os.path.join(save_dir, name)
+            cv2.imwrite(path, face_chip)
+            logger.info(f"Saved face_chip to: {path}")
+
+        await asyncio.to_thread(_save)
+
     async def analyze(self, image):
         """
         Analyze the face in the image, including detection, alignment, and attribute prediction.
@@ -98,6 +123,8 @@ class FaceAnalyze:
         if face_chip is None:
             logger.info("No face detected in analyze")
             return None, None, None, None, None
+        
+        await self.save_face_chip_async(face_chip)  # ✅ lưu bất đồng bộ
 
         # Bước 2: Xử lý nhận diện và phân tích khuôn mặt
         try:
