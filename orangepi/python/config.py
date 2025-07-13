@@ -33,7 +33,7 @@ OPI_CONFIG = {
     "rgb_framerate": 15,
 
     # --- Cấu hình Processor ---
-    "calib_file_path": os.path.join(os.path.dirname(BASE_DIR), "python/track_local/data", "calib_v3.npz"),
+    "calib_file_path": os.path.join(os.path.dirname(BASE_DIR), "python/calibration/cali_result", "cam105_07397.npz"),
     "results_dir": os.path.join(os.path.dirname(BASE_DIR), "results"),
     "distance_threshold_m": 4.0,
 
