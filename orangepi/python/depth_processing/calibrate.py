@@ -19,8 +19,9 @@ VISUALIZE = True # Bật/tắt cửa sổ xem trước, rất hữu ích để g
 
 # --- CẤU HÌNH ĐƯỜNG DẪN TỰ ĐỘNG ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-RGB_DIR = os.path.join(SCRIPT_DIR, "rgb_frames")
-AMP_DIR = os.path.join(SCRIPT_DIR, "amplitude_frames")
+DATASET_DIR = os.path.join(SCRIPT_DIR, "cam_105")
+RGB_DIR = os.path.join(DATASET_DIR, "rgb_frames")
+AMP_DIR = os.path.join(DATASET_DIR, "amplitude_frames")
 TOF_INTRINSICS_FILE = os.path.join(SCRIPT_DIR, "tof_intrinsics.npz")
 STEREO_OUTPUT_FILE = os.path.join(SCRIPT_DIR, "stereo_calib_result.npz")
 
