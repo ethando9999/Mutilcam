@@ -13,7 +13,7 @@ import cv2
 import os
 import glob
 
-from orangepi.python.config_x import FACE_CONFIG
+from config import FACE_CONFIG
 
 class FaceAnalyze:
     def __init__(self):

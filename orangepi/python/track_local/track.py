@@ -22,8 +22,8 @@ class TrackingManager:
     def __init__(self,
                  gating_threshold: float = CHI2INV95_4,
                  max_time_lost: int = 30,
-                 proximity_thresh: float = 0.7,
-                 appearance_thresh: float = 0.5,
+                 proximity_thresh: float = 0.6,
+                 appearance_thresh: float = 0.4,
                  feature_history_len: int = 5):
         """
         kalman_filter: instance của KalmanFilter2D đã định nghĩa.
@@ -48,6 +48,7 @@ class TrackingManager:
         """
         Chuyển bbox [x1,y1,x2,y2] sang measurement [cx, cy, w, h].
         """
+        
         x1, y1, x2, y2 = bbox
         w = x2 - x1
         h = y2 - y1

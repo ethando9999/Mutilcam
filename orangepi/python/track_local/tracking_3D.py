@@ -2,7 +2,8 @@ import numpy as np
 from collections import OrderedDict, deque
 
 # Import lớp KalmanFilter3D đã được nâng cấp và hằng số chi2inv95
-from kalman_filter_3d import KalmanFilter3D, chi2inv95
+from .kalman_filter_3D_pro import KalmanFilter3D, chi2inv95
+from .kalman_filter_2D import KalmanFilter2D
 
 # Giả sử logger đã được thiết lập
 import logging
@@ -10,12 +11,14 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+
 logger = logging.getLogger(__name__)
 
-class TrackingManager:
+class TrackingManager3D:
     """
-    Manages track state by combining a 2D Kalman Filter (for bbox) and
-    a 3D Kalman Filter (for 3D point) for each object ID.
+    Quản lý trạng thái track bằng cách kết hợp bộ lọc Kalman 2D (cho bbox) và
+    bộ lọc Kalman 3D (cho điểm 3D) cho mỗi ID đối tượng.
+    Phiên bản này có thể xử lý các trường hợp `point3d` là `None`.
     """
     def __init__(self,
                  max_time_lost: int = 30,
@@ -24,10 +27,10 @@ class TrackingManager:
                  gating_thresh_3d: float = chi2inv95[3]):
         """
         Args:
-            max_time_lost (int): Max frames a track can be lost before deletion.
-            proximity_thresh (float): Min IoU threshold for 2D matching.
-            gating_thresh_2d (float): Mahalanobis threshold for the 2D filter.
-            gating_thresh_3d (float): Mahalanobis threshold for the 3D filter.
+            max_time_lost (int): Số khung hình tối đa một track có thể bị mất trước khi bị xóa.
+            proximity_thresh (float): Ngưỡng IoU tối thiểu để kết hợp 2D.
+            gating_thresh_2d (float): Ngưỡng Mahalanobis cho bộ lọc 2D.
+            gating_thresh_3d (float): Ngưỡng Mahalanobis cho bộ lọc 3D.
         """
         self.kf2d = KalmanFilter2D()
         self.kf3d = KalmanFilter3D()
@@ -59,12 +62,16 @@ class TrackingManager:
         return inter_area / union_area if union_area > 0 else 0.0
 
     def predict_all(self, current_frame_id: int):
-        """Predicts all tracks to the current frame and removes stale ones."""
+        """Dự đoán tất cả các track đến khung hình hiện tại và xóa các track cũ."""
         for tr in self.tracks.values():
             if current_frame_id > tr['last_frame_id']:
-                # Predict both 2D and 3D states
+                # Luôn dự đoán trạng thái 2D
                 tr['kf2d']['mean'], tr['kf2d']['covariance'] = self.kf2d.predict(tr['kf2d']['mean'], tr['kf2d']['covariance'])
-                tr['kf3d']['mean'], tr['kf3d']['covariance'] = self.kf3d.predict(tr['kf3d']['mean'], tr['kf3d']['covariance'])
+                
+                # Chỉ dự đoán trạng thái 3D nếu nó tồn tại
+                if 'kf3d' in tr:
+                    tr['kf3d']['mean'], tr['kf3d']['covariance'] = self.kf3d.predict(tr['kf3d']['mean'], tr['kf3d']['covariance'])
+                
                 tr['time_since_update'] += (current_frame_id - tr['last_frame_id'])
                 tr['last_frame_id'] = current_frame_id
         self._remove_stale_tracks()
@@ -72,26 +79,33 @@ class TrackingManager:
     def _remove_stale_tracks(self):
         to_remove = [pid for pid, tr in self.tracks.items() if tr['time_since_update'] > self.max_time_lost]
         for pid in to_remove:
+            logger.info(f"Removing stale track ID: {pid}")
             del self.tracks[pid]
 
     def add_track(self, object_id, bbox, point3d, frame_id: int):
-        """Initializes and adds a new track with both 2D and 3D states."""
-        # Initiate 2D state
+        """Khởi tạo và thêm một track mới. Trạng thái 3D là tùy chọn."""
+        # Khởi tạo trạng thái 2D (bắt buộc)
         meas2d = self.bbox_tlbr_to_xywh(bbox)
         mean2d, cov2d = self.kf2d.initiate(meas2d)
         
-        # Initiate 3D state
-        mean3d, cov3d = self.kf3d.initiate(point3d)
-
-        self.tracks[object_id] = {
+        track_data = {
             'kf2d': {'mean': mean2d, 'covariance': cov2d},
-            'kf3d': {'mean': mean3d, 'covariance': cov3d},
             'last_frame_id': frame_id,
             'time_since_update': 0,
         }
 
+        # Khởi tạo trạng thái 3D (tùy chọn)
+        if point3d is not None:
+            mean3d, cov3d = self.kf3d.initiate(np.array(point3d))
+            track_data['kf3d'] = {'mean': mean3d, 'covariance': cov3d}
+            logger.info(f"Adding new track {object_id} with 2D and 3D state.")
+        else:
+            logger.info(f"Adding new track {object_id} with only 2D state.")
+            
+        self.tracks[object_id] = track_data
+
     def update_track(self, object_id, bbox, point3d, frame_id: int):
-        """Updates an existing track with new 2D and 3D measurements."""
+        """Cập nhật một track hiện có với các đo lường mới."""
         if object_id not in self.tracks:
             self.add_track(object_id, bbox, point3d, frame_id)
             return
@@ -100,63 +114,84 @@ class TrackingManager:
         if frame_id > tr['last_frame_id']:
              self.predict_all(frame_id)
 
-        # Update 2D state
+        # Cập nhật trạng thái 2D
         meas2d = self.bbox_tlbr_to_xywh(bbox)
         tr['kf2d']['mean'], tr['kf2d']['covariance'] = self.kf2d.update(tr['kf2d']['mean'], tr['kf2d']['covariance'], meas2d)
         
-        # Update 3D state
-        tr['kf3d']['mean'], tr['kf3d']['covariance'] = self.kf3d.update(tr['kf3d']['mean'], tr['kf3d']['covariance'], point3d)
+        # Cập nhật hoặc khởi tạo trạng thái 3D nếu có point3d
+        if point3d is not None:
+            if 'kf3d' in tr:
+                # Cập nhật trạng thái 3D hiện có
+                tr['kf3d']['mean'], tr['kf3d']['covariance'] = self.kf3d.update(tr['kf3d']['mean'], tr['kf3d']['covariance'], np.array(point3d))
+            else:
+                # Khởi tạo trạng thái 3D lần đầu tiên cho track này
+                logger.info(f"Initiating 3D state for existing track {object_id}.")
+                mean3d, cov3d = self.kf3d.initiate(np.array(point3d))
+                tr['kf3d'] = {'mean': mean3d, 'covariance': cov3d}
         
         tr['last_frame_id'] = frame_id
         tr['time_since_update'] = 0
 
     def match(self, bbox, point3d, frame_id: int):
         """
-        Matches a new detection using a 2D->3D cascade.
-        1. Filters candidates using 2D bbox (Mahalanobis + IoU).
-        2. Selects the best from the candidates using 3D point (min Mahalanobis).
+        Kết hợp một phát hiện mới.
+        - Nếu `point3d` tồn tại, sử dụng xếp tầng 2D->3D.
+        - Nếu `point3d` là `None`, chỉ sử dụng kết hợp 2D (IoU cao nhất).
         """
         if not self.tracks:
             return None
 
         self.predict_all(frame_id)
         
-        # --- Stage 1: 2D Filtering (Gating + Proximity) ---
+        # --- Giai đoạn 1: Lọc 2D (Gating + Proximity) ---
         meas2d = self.bbox_tlbr_to_xywh(bbox)
         preliminary_candidates = []
         for pid, tr in self.tracks.items():
-            # 2D Mahalanobis gating
+            # Gating bằng khoảng cách Mahalanobis 2D
             dist2d = self.kf2d.gating_distance(tr['kf2d']['mean'], tr['kf2d']['covariance'], meas2d.reshape(1, -1))[0]
             if dist2d > self.gating_thresh_2d:
                 continue
 
-            # 2D IoU proximity check
+            # Kiểm tra độ gần bằng IoU 2D
             pred_bbox = self.xywh_to_tlbr(tr['kf2d']['mean'][:4])
             iou_score = self.iou(pred_bbox, np.array(bbox, dtype=np.float32))
             if iou_score < self.proximity_thresh:
                 continue
             
-            preliminary_candidates.append(pid)
+            preliminary_candidates.append((pid, iou_score))
 
         if not preliminary_candidates:
             return None
 
-        # --- Stage 2: 3D Selection ---
-        final_candidates = []
-        for pid in preliminary_candidates:
-            tr = self.tracks[pid]
-            dist3d = self.kf3d.gating_distance(tr['kf3d']['mean'], tr['kf3d']['covariance'], np.array(point3d))[0]
-            if dist3d <= self.gating_thresh_3d:
-                final_candidates.append((pid, dist3d))
+        # --- Giai đoạn 2: Lựa chọn dựa trên sự sẵn có của point3d ---
+        
+        # Trường hợp 1: Phát hiện có dữ liệu 3D -> Lựa chọn bằng 3D
+        if point3d is not None:
+            final_candidates = []
+            for pid, iou_score in preliminary_candidates:
+                tr = self.tracks[pid]
+                # Chỉ xem xét các track đã có trạng thái 3D
+                if 'kf3d' in tr:
+                    dist3d = self.kf3d.gating_distance(tr['kf3d']['mean'], tr['kf3d']['covariance'], np.array(point3d))[0]
+                    if dist3d <= self.gating_thresh_3d:
+                        final_candidates.append((pid, dist3d))
 
-        if not final_candidates:
-            return None
+            if not final_candidates:
+                return None
 
-        # Select the best candidate with the minimum 3D distance
-        best_pid, _ = min(final_candidates, key=lambda x: x[1])
-        return best_pid
+            # Chọn ứng viên tốt nhất với khoảng cách 3D nhỏ nhất
+            best_pid, _ = min(final_candidates, key=lambda x: x[1])
+            return best_pid
+        
+        # Trường hợp 2: Phát hiện không có dữ liệu 3D -> Lựa chọn bằng 2D
+        else:
+            # Chọn ứng viên tốt nhất với điểm IoU cao nhất từ các ứng viên sơ bộ
+            best_pid, _ = max(preliminary_candidates, key=lambda x: x[1])
+            return best_pid
+
 
     def get_active_tracks(self):
+        """Trả về danh sách ID của các track đang hoạt động."""
         return list(self.tracks.keys())
 
 

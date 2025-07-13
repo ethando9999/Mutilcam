@@ -24,7 +24,7 @@ OPI_CONFIG = {
     "device_id": "opi_01",
     "db_path": os.path.join(os.path.dirname(BASE_DIR), "database", "database_opi.db"),
 
-    # --- Cấu hình cho Stereo Producer (put_RGBD.py) ---
+    # --- Cấu hình Producer ---
     "slave_ip": "192.168.100.2",
     "tcp_port": 5005,
     "rgb_camera_id": 0,
@@ -32,19 +32,25 @@ OPI_CONFIG = {
     "rgb_resolution": (640, 480),
     "rgb_framerate": 15,
 
-    # --- Cấu hình cho Processor (processing_RGBD.py) ---
-    "model_path": os.path.join(os.path.dirname(BASE_DIR), "models", "yolov8_pose.rknn"),
-    "calib_file_path": os.path.join(os.path.dirname(BASE_DIR), "python/track_local/data", "calib_v2.npz"), 
+    # --- Cấu hình Processor ---
+    "calib_file_path": os.path.join(os.path.dirname(BASE_DIR), "python/track_local/data", "calib_v3.npz"),
     "results_dir": os.path.join(os.path.dirname(BASE_DIR), "results"),
-    "distance_threshold_m": 4.0, # Ngưỡng khoảng cách 4 mét
+    "distance_threshold_m": 4.0,
+
+    ### <<< THÊM CẤU HÌNH WEBSOCKET VÀO ĐÂY >>> ###
+    "SOCKET_COUNT_URI": "ws://192.168.1.128:8080/api/ws/camera",
+    "SOCKET_HEIGHT_URI": "ws://192.168.1.168:8080/api/ws/camera",
+    "SOCKET_ID_URI": "ws://192.168.1.128:9090/api/ws/camera",
+    "SOCKET_TABLE_ID": 1,
 
     # --- Cấu hình Re-ID ---
-    "output_dir": DEFAULT_OUTPUT_DIR, 
+    "output_dir": DEFAULT_OUTPUT_DIR,
     "feature_threshold": 0.7, "color_threshold": 0.7, "avg_threshold": 0.7,
     "top_k": 3, "thigh_weight": 8, "torso_weight": 8, "feature_weight": 0.75,
     "color_weight": 0.25, "temp_timeout": 40, "min_detections": 3,
-    "merge_threshold": 0.75, "face_threshold": 0.75, 
+    "merge_threshold": 0.75, "face_threshold": 0.75,
 }
+
 
 # --- CẤU HÌNH CHO Raspberry Pi (Single Camera) --- 
 RPI_CONFIG = {
@@ -55,8 +61,8 @@ RPI_CONFIG = {
 } 
 
 FACE_CONFIG = {
-    "face_detection_conf": 0.9, 
-    "race_conf": 0.85,
-    "gender_conf": 0.9,
-    "age_conf":0.85,
+    "face_detection_conf": 0.7, 
+    "race_conf": 0.5,
+    "gender_conf": 0.5,
+    "age_conf":0.8,
 }
