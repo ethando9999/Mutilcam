@@ -34,7 +34,6 @@ OPI_CONFIG = {
     "rgb_framerate": 15,
 
     # --- Cấu hình cho Processor (processing_RGBD.py) ---
-    "model_path": os.path.join(BASE_DIR, "models", "yolov8_pose.rknn"),
     "calib_file_path": os.path.join(BASE_DIR, "depth_processing/cali_result", "0.9305.npz"),
     "results_dir": os.path.join(BASE_DIR, "results_tof"),
     "distance_threshold_m": 4.0, # Ngưỡng khoảng cách 4 mét

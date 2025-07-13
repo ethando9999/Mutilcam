@@ -23,7 +23,7 @@ class FrameProcessor:
     Xử lý các lô frame RGB-D, từ phát hiện người cho đến trích xuất thông tin chi tiết.
     Phiên bản này được tối ưu để hoạt động ổn định và hiệu quả trên thiết bị biên.
     """
-    def __init__(self, batch_size: int = 1):
+    def __init__(self, batch_size: int = 1): 
         """
         Khởi tạo tất cả các module cần thiết cho việc xử lý.  
         """
@@ -116,7 +116,7 @@ class FrameProcessor:
         """Hàm helper để chạy các hàm blocking trong luồng riêng."""
         return await asyncio.to_thread(func, *args)
 
-    async def save_debug_images(self, base_name, rgb_frame, tof_depth_frame, rgb_box, tof_box):
+    async def save_debug_images(self, base_name, rgb_frame, tof_depth_frame, rgb_box, tof_box:None):
         """Lưu ảnh RGB, TOF màu full và file depth raw vào thư mục riêng biệt."""
         try:
             # Chuyển depth thành ảnh màu để dễ debug
@@ -188,7 +188,10 @@ class FrameProcessor:
                         torso,
                         tof_depth_map
                     )
-                    if status != "OK" or distance_mm is None or not (0 < distance_mm < 5000):
+                    if status != "OK" or distance_mm is None or not (0 < distance_mm < 4000):
+                        logger.info(f"Có người ngoài 4m, distance_mm {distance_mm} status: {status}")
+                        debug_name = f"{datetime.now():%Y%m%d_%H%M%S%f}_F{frame_id}"
+                        await self.save_debug_images(debug_name, rgb_frame, tof_depth_map, box, None)
                         return None
                 else:
                     distance_mm = precomputed_distance_mm
@@ -196,7 +199,7 @@ class FrameProcessor:
                 # B2: Kiểm tra FOV ToF sử dụng precomputed distance
                 tof_box = self.stereo_projector.project_rgb_box_to_tof(box, tof_depth_map, distance_mm)
                 if tof_box is None:
-                    logger.debug(f"Frame {frame_id}: hộp ngoài FOV ToF.")
+                    logger.info(f"Frame {frame_id}: hộp ngoài FOV ToF.")
                     return None
 
                 # B3: Cắt ROI RGB
@@ -252,97 +255,76 @@ class FrameProcessor:
                                     height_queue: asyncio.Queue):
         frame_number = 0
         while True:
-            # 1. Build batch
-            batch = []
+            # 1. Lấy 1 frame từ queue
             try:
-                first = await asyncio.wait_for(frame_queue.get(), timeout=5.0)
-                if first is None:
+                item = await frame_queue.get()
+                if item is None:
                     break
-                batch.append(first)
+                rgb_path, depth_path, _ = item
                 frame_queue.task_done()
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except Exception:
                 continue
 
-            while len(batch) < self.batch_size:
-                try:
-                    item = frame_queue.get_nowait()
-                    if item is None:
-                        frame_queue.put_nowait(None)
-                        break
-                    batch.append(item)
-                    frame_queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
-
-            if not batch:
-                continue
-
-            # 2. Load data
-            frames = []  # (idx, rgb, depth)
-            for idx, (rgb_path, depth_path, _) in enumerate(batch):
-                try:
-                    rgb = cv2.imread(rgb_path)
-                    depth = np.load(depth_path) if depth_path and os.path.exists(depth_path) else None
-                    if rgb is not None and depth is not None:
-                        frames.append((idx, rgb, depth))
-                except Exception as e:
-                    logger.error(f"Error loading {rgb_path}: {e}")
-
-            if not frames:
-                continue
-
-            # 3. Detect people
-            detect_tasks = [self._run_in_executor(self.detector.run_detection, rgb) for (_, rgb, _) in frames]
-            results = await asyncio.gather(*detect_tasks, return_exceptions=True)
-
-            # 4. Validate and count per frame
-            per_frame_counts = []
-            proc_tasks = []
-            for (orig_idx, rgb, depth), det in zip(frames, results):
-                if isinstance(det, Exception) or not det:
-                    per_frame_counts.append(0)
+            # 2. Đọc dữ liệu
+            try:
+                rgb = cv2.imread(rgb_path)
+                depth = np.load(depth_path) if depth_path and os.path.exists(depth_path) else None
+                if rgb is None or depth is None:
                     continue
+            except Exception as e:
+                logger.error(f"Error loading data: {e}")
+                continue
 
+            # 3. Phát hiện người
+            try:
+                det = await self._run_in_executor(self.detector.run_detection, rgb)
+            except Exception as e:
+                logger.error(f"Detection error: {e}")
+                det = None
+
+            # 4. Xác thực và tạo task xử lý
+            proc_tasks = []
+            if det:
                 keypoints, boxes = det
-                valid_count = 0
+                logger.warning(f"[DEBUG] yolo phat hien tren anh rgb: {len(keypoints)} nguoi")
                 for kpts, box in zip(keypoints, boxes):
                     if not self._is_detection_valid(box, kpts, rgb.shape):
                         continue
                     torso = get_torso_box(kpts, box)
-                    # Directly enqueue human processing without precomputed distance
                     proc_tasks.append(
                         self.process_human_async(
-                            frame_number + orig_idx,
+                            frame_number,
                             rgb,
                             depth,
                             torso,
                             kpts
                         )
                     )
-                    valid_count += 1
-                per_frame_counts.append(valid_count)
+                
 
-            # 5. Update people count
-            max_count = max(per_frame_counts, default=0)
-            await self._check_and_put_count(max_count, people_count_queue)
-
-            # 6. Process all human tasks
+            # 5. Thực thi xử lý con người và tính số người hợp lệ
             heights_cm = []
+            valid_results = []
             if proc_tasks:
                 results = await asyncio.gather(*proc_tasks, return_exceptions=True)
                 for res in results:
                     if isinstance(res, dict):
-                        # Filter by computed height if present
+                        valid_results.append(res)
                         h_m = res.get("est_height_m")
                         if h_m:
                             heights_cm.append(h_m * 100)
                         res["camera_id"] = config.OPI_CONFIG.get("device_id", "opi_01")
                         await processing_queue.put(res)
 
-            # 7. Send heights
+            # 6. Cập nhật số người dựa trên valid_results
+            count = len(valid_results)
+            await self._check_and_put_count(count, people_count_queue)
+
+            # 7. Gửi chiều cao
             await height_queue.put({"table_id": self.table_id, "heights_cm": heights_cm})
-            frame_number += len(frames)
-                    
+
+            frame_number += 1
+
 async def start_processor(frame_queue: asyncio.Queue, processing_queue: asyncio.Queue, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue):
     logger.info("Khởi động worker xử lý (Phiên bản cuối cùng)...")
     try:

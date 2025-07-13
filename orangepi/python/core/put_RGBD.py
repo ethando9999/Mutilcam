@@ -112,7 +112,7 @@ class SlaveCommunicator:
                 return None, None
 
 class FramePutter:
-    def __init__(self, rgb_camera_id: int, target_fps: int = 3):
+    def __init__(self, rgb_camera_id: int, target_fps: int = 1):
         self.stop_event = asyncio.Event()
         self.rgb_camera_id = rgb_camera_id
         
@@ -128,7 +128,7 @@ class FramePutter:
             
         self.slave = SlaveCommunicator(
             slave_ip=config.OPI_CONFIG["slave_ip"],
-            tcp_port=config.OPI_CONFIG["tcp_port"]
+            tcp_port=config.OPI_CONFIG["tcp_port"] 
         )
         
         self.frame_count = 0
@@ -137,7 +137,8 @@ class FramePutter:
     async def put_frames_queue(self, frame_queue: asyncio.Queue):
         loop = asyncio.get_running_loop()
         # Sử dụng camera ID được truyền vào
-        cap = cv2.VideoCapture(0) 
+        self.rgb_camera_id = self.rgb_camera_id
+        cap = cv2.VideoCapture(self.rgb_camera_id) 
         if not cap.isOpened():
             logger.error(f"❌ Không mở được camera RGB với ID: {self.rgb_camera_id}")
             return

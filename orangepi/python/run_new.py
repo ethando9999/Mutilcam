@@ -6,7 +6,7 @@ import os
 import psutil
 
 from database.create_db import create_database
-from id.main_id_new import start_id, PersonReID
+# from id.main_id_new import start_id, PersonReID
 
 ### <<< THAY ĐỔI 1: IMPORT CÁC THÀNH PHẦN CẦN THIẾT >>> ###
 from socket_manager.socket_sender import start_socket_sender
@@ -55,7 +55,7 @@ async def main(args):
         from config import RPI_CONFIG as ID_CONFIG
     elif "opi" in device_id:
         from core.put_RGBD import start_putter
-        from core.processing_RGBD import start_processor
+        from core.procesing_rgbd_1 import start_processor
         from config import OPI_CONFIG as ID_CONFIG
     else:
         raise ValueError("device_id phải là 'rpi' hoặc 'opi'")
@@ -83,7 +83,7 @@ async def main(args):
             logger.info(f"Sử dụng cơ sở dữ liệu hiện có: {db_path}")
 
     # Khởi tạo các hàng đợi asyncio
-    frame_queue = asyncio.Queue(maxsize=100)
+    frame_queue = asyncio.Queue(maxsize=10)
     processing_queue = asyncio.Queue(maxsize=1000)
     id_socket_queue = asyncio.Queue()
     people_count_queue = asyncio.Queue(maxsize=1)
@@ -109,7 +109,7 @@ async def main(args):
     filtered_config["id_socket_queue"] = id_socket_queue
 
     # Khởi tạo PersonReID với các tham số đã được lọc
-    person_reid = PersonReID(**filtered_config)
+    # person_reid = PersonReID(**filtered_config)
     # --- KẾT THÚC CẬP NHẬT ---
 
     # Danh sách task để theo dõi và huỷ đúng cách
@@ -118,10 +118,10 @@ async def main(args):
     camera_id = ID_CONFIG.get("rgb_camera_id", 0)
 
     try:
-        person_reid_instance = person_reid
+        # person_reid_instance = person_reid
         all_tasks.append(asyncio.create_task(start_putter(frame_queue, camera_id)))
         all_tasks.append(asyncio.create_task(start_processor(frame_queue, processing_queue, people_count_queue, height_queue)))
-        all_tasks.append(asyncio.create_task(start_id(processing_queue, person_reid_instance))) 
+        # all_tasks.append(asyncio.create_task(start_id(processing_queue, person_reid_instance))) 
 
         ### <<< THAY ĐỔI 3: THÊM CÁC TASK MỚI VÀO VÒNG LẶP SỰ KIỆN >>> ###
         all_tasks.append(asyncio.create_task(start_socket_sender(id_socket_queue, ID_CONFIG.get("SOCKET_ID_URI"))))
@@ -137,8 +137,8 @@ async def main(args):
         all_tasks.append(asyncio.create_task(monitor_system()))
         
         # Thêm task rabbitmq từ đối tượng person_reid vào danh sách quản lý
-        if hasattr(person_reid_instance, '_rabbit_task'):
-             all_tasks.append(person_reid_instance._rabbit_task)
+        # if hasattr(person_reid_instance, '_rabbit_task'):
+        #      all_tasks.append(person_reid_instance._rabbit_task)
 
         await asyncio.gather(*all_tasks)
 
