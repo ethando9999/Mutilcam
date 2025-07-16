@@ -2,22 +2,22 @@ import os
 import time
 import json
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import uuid
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import aiosqlite
-import uuid
-import sqlite_vec
 from sklearn.metrics.pairwise import cosine_similarity
-from utils.pose_color_signature_new import preprocess_color
-from track_local.track import TrackingManager
 
+from track_local.track import TrackingManager
 from utils.logging_python_orangepi import get_logger
+
+from config import OPI_CONFIG
 
 logger = get_logger(__name__)
 
-class ReIDManager:
+class ReIDManager: 
     def __init__(
         self,
         db_path='database.db',
@@ -27,22 +27,21 @@ class ReIDManager:
         top_k=3,
         global_color_mean=None,
         thigh_weight: float = 4,
-        torso_weight: float = 4, 
+        torso_weight: float = 4,
         feature_weight: float = 0.5,
         color_weight: float = 0.5,
-        δ0_feat = 0.25,
-        δ_margin = 0.05,
-        face_threshold = 0.8,
+        δ0_feat=0.25,
+        δ_margin=0.05,
+        face_threshold=0.8,
     ):
         self.db_path = db_path
         self.feature_threshold = feature_threshold
-        self.color_threshold = color_threshold 
+        self.color_threshold = color_threshold
         self.avg_threshold = avg_threshold
         self.top_k = top_k
         self.face_threshold = face_threshold
 
-
-        # incremental stats for global mean
+        # Global color stats
         self.sum_color = np.zeros(51, dtype=np.float64)
         self.count_color = np.zeros(51, dtype=np.int64)
         if global_color_mean is not None:
@@ -57,524 +56,343 @@ class ReIDManager:
             where=self.count_color > 0
         ).astype(np.float32)
 
-        # ------------------------------------------------------------------
-        # THÊM: trọng số cho thigh & torso trên 45-dim
-        # ------------------------------------------------------------------
-        self.thigh_weight = thigh_weight  
+        # Weights for color regions
+        self.thigh_weight = thigh_weight
         self.torso_weight = torso_weight
 
-        # history for moving average per person
+        # History
         self.feature_history = defaultdict(lambda: deque(maxlen=20))
-        self.color_history   = defaultdict(lambda: deque(maxlen=20))
+        self.color_history = defaultdict(lambda: deque(maxlen=20))
         self.face_embedding_history = defaultdict(lambda: deque(maxlen=20))
 
-        # initialization
+        # Async DB setup
         self.db_lock = asyncio.Lock()
         self.db_init = asyncio.Event()
         self.db = None
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.vec_ext = '/usr/local/lib/vec0.so'
-        self.connection = None
-        self.channel = None
-        self.alias_map: dict[str, str] = {} 
 
-        # start init tasks
+        self.alias_map: dict[str, str] = {}
+
         asyncio.create_task(self._init_database())
 
-        self.tracking_manager = TrackingManager(
-            max_time_lost=20,           # ví dụ 30
-            proximity_thresh=0.7,                # tuỳ chỉnh
-            appearance_thresh=0.5,               # tuỳ chỉnh
-            feature_history_len=5
-        )
+        self.tracking_manager = TrackingManager()
+        self.hard_face_threshold = 0.8
+        self.hard_feature_threshold = 0.7
 
-        # asyncio.create_task(self.setup_rabbitmq(rabbitmq_url))
         logger.info("ReIDManager init successful")
 
     async def _init_database(self):
-        async with self.db_lock: 
-            # # 1) Tạo schema (bằng script bên ngoài)
-            # from database.create_db import initialize_db
-            # self.use_vec = await initialize_db(self.db_path, self.vec_ext)
-
-            # 2) Mở kết nối
+        async with self.db_lock:
             db = await aiosqlite.connect(self.db_path)
             await db.execute("PRAGMA foreign_keys = ON;")
             await db.enable_load_extension(True)
-            # await db.load_extension(self.vec_ext)
-            await db.load_extension(sqlite_vec.loadable_path())
-
-            # 3) Bản ghi mặc định cho Cameras & Frames
-            #    (chỉ thêm nếu chưa có – tránh lỗi trùng khóa)
-            await db.execute(
-                "INSERT OR IGNORE INTO Cameras(camera_id, location, resolution, model) "
-                "VALUES('edge', 'unknown', 'unknown', 'unknown');"
-            )
-
-            ts = asyncio.get_event_loop().time()
-            await db.execute(
-                "INSERT OR IGNORE INTO Frames(frame_id, timestamp, camera_id) "
-                "VALUES('frame0', ?, 'edge');",
-                (ts,)
-            )
-
-            await db.commit()
-
-            # 4) Hoàn tất
+            await db.load_extension(self.vec_ext)
             self.db = db
             self.db_init.set()
-            logger.info("Database ready, schema initialized, and default rows inserted.")
-
+            logger.info("Database ready and schema initialized.")
 
     async def _ensure_db_ready(self):
         await self.db_init.wait()
 
-    def normalize(self, v: np.ndarray) -> np.ndarray:
+    def normalize(self, v: np.ndarray) -> np.ndarray | None:
+        if v is None:
+            return None
         v = v.flatten()
         n = np.linalg.norm(v)
         return v / n if n > 0 else v
 
-
-    def preprocess_color(self, body_color: np.ndarray):
-        # flat = body_color.flatten().astype(np.float32)
-        # mask = (~np.isnan(flat)).astype(np.float32)
-        # filled = np.where(np.isnan(flat), self.global_color_mean, flat)
-        # normed = self.normalize(filled)
-        # return normed, mask
-        weighted, mask = preprocess_color(body_color, self.thigh_weight, self.torso_weight)
-        normed = self.normalize(weighted)
-        return normed, mask
-    
-    def _update_global_color_stats(self, color_mean: np.ndarray):
-        valid = ~np.isnan(color_mean)
-        self.sum_color[valid] += color_mean[valid]
-        self.count_color[valid] += 1
-        self.global_color_mean[valid] = (
-            self.sum_color[valid] / self.count_color[valid]
-        ).astype(np.float32)
-
-
-    async def create_person(self, gender, race, age, body_color, feature, face_embedding,
-                            bbox_data=None, frame_id=None):
+    async def create_person(
+        self,
+        gender, race, age, body_color, feature, face_embedding,
+        est_height_m, head_point_3d,
+        bbox_data=None, frame_id=None, time_detect=None
+    ):
         """
-        Thêm optional bbox_data (list/ndarray [x1,y1,x2,y2]) và frame_id (int) để tạo track ngay.
+        Tạo một nhân vật mới và ghi vào DB. 
         """
-        await self._ensure_db_ready()   
+        await self._ensure_db_ready()
         try:
-            # 1) Chuẩn bị embedding/color/face
-            feat_v = self.normalize(np.array(feature, dtype=np.float32)) if feature is not None else None
-            color_v, _ = self.preprocess_color(np.array(body_color, dtype=np.float32)) if body_color is not None else (None, None)
-            face_v = self.normalize(np.array(face_embedding, dtype=np.float32)) if face_embedding is not None else None
-
             pid = str(uuid.uuid4())
+            ts = time_detect if time_detect is not None else time.time()
+
+            feat_v = self.normalize(np.array(feature, np.float32) if feature is not None else None)
+            face_v = self.normalize(np.array(face_embedding, np.float32) if face_embedding is not None else None)
 
             async with self.db_lock:
-                # 2) Tạo bản ghi Persons
+                # Insert vào bảng chính
                 await self.db.execute("INSERT INTO Persons(person_id) VALUES (?);", (pid,))
-
-                # 3) Chèn embedding vào PersonsVec
-                await self.db.execute(
-                    "INSERT INTO PersonsVec(person_id, feature_mean, body_color_mean) VALUES(?, vec_f32(?), vec_f32(?));",
-                    (
-                        pid,
-                        feat_v.tobytes() if feat_v is not None else None,
-                        color_v.tobytes() if color_v is not None else None,
-                    )
-                )
-                # 4) FaceVector nếu có
-                if face_v is not None: 
+                
+                if feat_v is not None:
                     await self.db.execute(
-                        "INSERT OR REPLACE INTO FaceVector(person_id, face_embedding) VALUES(?, vec_f32(?))",
+                        "INSERT INTO PersonsVec(person_id, feature_mean) VALUES (?, vec_f32(?));",
+                        (pid, feat_v.tobytes())
+                    )
+                if face_v is not None:
+                    await self.db.execute(
+                        "INSERT INTO FaceVector(person_id, face_embedding) VALUES (?, vec_f32(?));",
                         (pid, face_v.tobytes())
                     )
-                # 5) Metadata
+
+                # --- SỬA LỖI Ở ĐÂY ---
+                # Chuyển đổi tường minh sang kiểu dữ liệu Python gốc
                 await self.db.execute(
-                    "INSERT INTO PersonsMeta(person_id, age, gender, race) VALUES (?, ?, ?, ?);",
-                    (pid, age, gender, race)
+                    "INSERT INTO PersonsMeta(person_id, age, gender, race, height_mean) "
+                    "VALUES (?, ?, ?, ?, ?);",
+                    (pid, str(age), str(gender), str(race), float(est_height_m) if est_height_m is not None else None)
                 )
-                # 6) Detection khởi tạo trong DB (không liên quan track manager, nhưng lưu log)
-                ts = asyncio.get_event_loop().time()
-                # Nếu muốn lưu frame_id thật, có thể truyền frame_id vào cột frame_id thay 'frame0'
-                # db_frame = frame_id if frame_id is not None else 'frame0'
+
+                # Đảm bảo frame tồn tại trước
+                if frame_id is not None:
+                    await self.db.execute(
+                        "INSERT OR IGNORE INTO Frames(frame_id, timestamp) VALUES (?, ?);",
+                        (frame_id, ts)
+                    )
+
+                # Thêm bản ghi vào Detections
                 await self.db.execute(
-                    "INSERT INTO Detections(person_id, timestamp, camera_id, frame_id) VALUES(?, ?, ?, ?);",
-                    (pid, ts, None, None)
+                    "INSERT INTO Detections(person_id, timestamp, frame_id) "
+                    "VALUES (?, ?, ?);",
+                    (pid, ts, frame_id)
                 )
+
+                # Tạo FeatureBank
+                if feat_v is not None:
+                    cur = await self.db.execute(
+                        "INSERT INTO FeatureBank(person_id) VALUES (?) RETURNING feature_id;", (pid,)
+                    )
+                    feat_id = (await cur.fetchone())[0]
+                    await self.db.execute(
+                        "INSERT INTO FeatureBankVec(feature_id, person_id, feature_vec) VALUES (?, ?, vec_f32(?));",
+                        (feat_id, pid, feat_v.tobytes())
+                    )
+
+                # Tạo FaceIDBank
+                if face_v is not None:
+                    cur2 = await self.db.execute(
+                        "INSERT INTO FaceIDBank(person_id) VALUES (?) RETURNING face_id;", (pid,)
+                    )
+                    face_id = (await cur2.fetchone())[0]
+                    await self.db.execute(
+                        "INSERT INTO FaceIDBankVec(face_id, person_id, face_vec) VALUES (?, ?, vec_f32(?));",
+                        (face_id, pid, face_v.tobytes())
+                    )
 
                 await self.db.commit()
 
-            # checkpoint WAL
-            async with self.db_lock:
-                await self.db.execute("PRAGMA wal_checkpoint(FULL);")
-                await self.db.commit()
-
-            # 7) Cập nhật history RAM
+            # Lưu history (dùng cho EMA)
             if feat_v is not None:
                 self.feature_history[pid].append(feat_v)
-            if color_v is not None:
-                self.color_history[pid].append(color_v)
-                self._update_global_color_stats(color_v)
             if face_v is not None:
                 self.face_embedding_history[pid].append(face_v)
 
-            # 8) Thêm vào tracking_manager nếu có bbox_data và frame_id
+            # Gửi vào tracker
             if bbox_data is not None and frame_id is not None:
-                # feature đã normalized là feat_v
-                # Gọi add_track
                 self.tracking_manager.add_track(pid, bbox_data, frame_id, feature=feat_v)
-                logger.info("Đã thêm ID vào tracking_manager")
-            return pid
+                logger.info("Added new track to tracking_manager")
 
+            return pid
         except Exception as e:
             logger.exception(f"[DB] Failed to create person: {e}")
             return None
 
-
-    async def update_person(self, person_id, gender=None, race=None, age=None,
-                            body_color=None, feature=None, face_embedding=None,
-                            bbox_data=None, frame_id=None):
-        """
-        Thêm optional bbox_data và frame_id để update track.
-        Các tham số metadata nếu None sẽ không cập nhật.
-        """
+    async def update_person(
+        self,
+        person_id,
+        gender=None, race=None, age=None,
+        body_color=None, feature=None, face_embedding=None,
+        est_height_m=None, head_point_3d=None,
+        bbox_data=None, frame_id=None, time_detect=None
+    ):
         await self._ensure_db_ready()
         try:
-            # Remap nếu alias
             person_id = self.alias_map.get(person_id, person_id)
-
-            # 1) Chuẩn bị embedding/color/face
-            feat_v = self.normalize(np.array(feature, dtype=np.float32)) if feature is not None else None
-            color_v, _ = self.preprocess_color(np.array(body_color, dtype=np.float32)) if body_color is not None else (None, None)
-            face_v = self.normalize(np.array(face_embedding, dtype=np.float32)) if face_embedding is not None else None
+            feat_v = self.normalize(np.asarray(feature, np.float32) if feature is not None else None)
+            face_v = self.normalize(np.asarray(face_embedding, np.float32) if face_embedding is not None else None)
+            ts = time_detect if time_detect is not None else time.time()
 
             async with self.db_lock:
-                ts = asyncio.get_event_loop().time()
-                # 2) Ghi detection
-                # db_frame = frame_id if frame_id is not None else 'frame0'
+                if frame_id is not None:
+                    await self.db.execute(
+                        "INSERT OR IGNORE INTO Frames(frame_id, timestamp) VALUES (?, ?);",
+                        (frame_id, ts)
+                    )
+                logger.info("[UPDATE] Frames pass")
                 await self.db.execute(
-                    "INSERT INTO Detections(person_id, timestamp, camera_id, frame_id) VALUES (?, ?, ?, ?);",
-                    (person_id, ts, None, None)
+                    "INSERT INTO Detections(person_id, timestamp, frame_id) VALUES (?, ?, ?);",
+                    (person_id, ts, frame_id)
                 )
-
-                # 3) Cập nhật lịch sử RAM
+                logger.info("[UPDATE] Detections pass")
                 if feat_v is not None:
                     self.feature_history[person_id].append(feat_v)
-                if color_v is not None:
-                    self.color_history[person_id].append(color_v)
-                    self._update_global_color_stats(color_v)
                 if face_v is not None:
                     self.face_embedding_history[person_id].append(face_v)
 
-                # 4) Tính moving average
-                # mv_feat = (np.mean(self.feature_history[person_id], axis=0)
-                #            if self.feature_history[person_id] else None)
-                # mv_color = (np.mean(self.color_history[person_id], axis=0)
-                #             if self.color_history[person_id] else None)
-                # mv_face = (self.face_embedding_history[person_id][-1]
-                #            if self.face_embedding_history[person_id] else None)
-                # 4) Tính EMA song song
-                mv_feat_coro  = asyncio.to_thread(compute_ema, self.feature_history[person_id])
-                mv_color_coro = asyncio.to_thread(compute_ema, self.color_history[person_id])
-                mv_face_coro  = asyncio.to_thread(compute_ema, self.face_embedding_history[person_id])
-
-                mv_feat, mv_color, mv_face = await asyncio.gather(
-                    mv_feat_coro,
-                    mv_color_coro,
-                    mv_face_coro,
+                mv_feat, mv_face = await asyncio.gather(
+                    asyncio.to_thread(compute_ema, self.feature_history[person_id]),
+                    asyncio.to_thread(compute_ema, self.face_embedding_history[person_id])
                 )
 
-                # 5) UPDATE PersonsVec nếu cần
-                if mv_feat is not None or mv_color is not None:
+                if mv_feat is not None:
                     await self.db.execute(
-                        """
-                        UPDATE PersonsVec
-                        SET feature_mean = vec_f32(?),
-                            body_color_mean = vec_f32(?)
-                        WHERE person_id = ?;
-                        """,
-                        (
-                            mv_feat.tobytes() if mv_feat is not None else None,
-                            mv_color.tobytes() if mv_color is not None else None,
-                            person_id
-                        )
+                        "UPDATE PersonsVec SET feature_mean = vec_f32(?) WHERE person_id = ?;",
+                        (mv_feat.tobytes(), person_id)
                     )
-                # 6) UPDATE FaceVector nếu cần
                 if mv_face is not None:
-                    async with self.db.execute("SELECT person_id FROM FaceVector WHERE person_id=?", (person_id,)) as cur:
-                        exists = await cur.fetchone()
-                    if exists:
-                        await self.db.execute(
-                            "UPDATE FaceVector SET face_embedding=vec_f32(?) WHERE person_id=?",
-                            (mv_face.tobytes(), person_id)
-                        )
-                    else:
-                        await self.db.execute(
-                            "INSERT INTO FaceVector(person_id, face_embedding) VALUES(?, vec_f32(?))",
-                            (person_id, mv_face.tobytes())
-                        )
+                    await self.db.execute(
+                        "UPDATE FaceVector SET face_embedding = vec_f32(?) WHERE person_id = ?;",
+                        (mv_face.tobytes(), person_id)
+                    )
 
-                # 7) UPDATE metadata nếu có
                 fields, params = [], []
-                if age is not None:
-                    fields.append("age = ?"); params.append(age)
-                if gender is not None:
-                    fields.append("gender = ?"); params.append(gender)
-                if race is not None:
-                    fields.append("race = ?"); params.append(race)
+                if age is not None: fields.append("age = ?"); params.append(age)
+                if gender is not None: fields.append("gender = ?"); params.append(gender)
+                if race is not None: fields.append("race = ?"); params.append(race)
+                if est_height_m is not None: fields.append("height_mean = ?"); params.append(est_height_m)
+
                 if fields:
                     sql = f"UPDATE PersonsMeta SET {', '.join(fields)} WHERE person_id = ?;"
                     params.append(person_id)
                     await self.db.execute(sql, params)
 
-                # 8) Commit và checkpoint
-                await self.db.commit()
-                await self.db.execute("PRAGMA wal_checkpoint(FULL);")
                 await self.db.commit()
 
-            # 9) Cập nhật tracking_manager nếu có bbox_data và frame_id
             if bbox_data is not None and frame_id is not None:
                 self.tracking_manager.update_track(person_id, bbox_data, frame_id, feature=feat_v)
-                logger.info("Đã update ID trong tracking_manager")
+                logger.info("Updated track in tracking_manager")
 
+            return True
         except Exception as e:
             logger.exception(f"[DB] Failed to update_person: {e}")
             return None
+
         
-    async def match_id(self, new_gender, new_race, new_age, new_body_color, new_feature, new_face_embedding: None, bbox_data: None, frame_id: None):
+    async def match_id(
+        self, 
+        gender=None, race=None, age=None,
+        body_color=None, feature=None, face_embedding=None,
+        est_height_m=None, head_point_3d=None,
+        bbox_data=None, frame_id=None
+    ):
+        """
+        Tìm ID khớp nhất cho một phát hiện mới.
+        """
         await self._ensure_db_ready()
         try:
             start = time.time()
 
-            # 1. Check inputs
-            if new_feature is None and new_body_color is None:
-                logger.warning("No feature OR color given for matching.")
+            if feature is None and face_embedding is None:
+                logger.warning("No feature or face embedding given for matching.")
                 return None
 
-            # 2. Normalize feature (nếu có)
-            nf = None
-            if new_feature is not None:
-                arr = np.asarray(new_feature, dtype=np.float32)
-                nf = self.normalize(arr)
+            nf = self.normalize(np.asarray(feature, dtype=np.float32)) if feature is not None else None
+            nface = self.normalize(np.asarray(face_embedding, dtype=np.float32)) if face_embedding is not None else None
+            
+            _ = body_color
+            _ = est_height_m
 
-            # 3. Preprocess body color (nếu có) 
-            nc = None
-            if new_body_color is not None:
-                bc = np.asarray(new_body_color, dtype=np.float32)
-                if bc.shape != (17,3):
-                    raise ValueError("new_body_color must be (17,3)")
-                nc, _ = self.preprocess_color(bc)
+            async with self.db_lock:
+                sql_parts = ["1=1"]
+                params = []
 
-            nface = self.normalize(np.array(new_face_embedding, dtype=np.float32)) if new_face_embedding is not None else None
+                if age is not None: 
+                    sql_parts.append("(age = ? OR age IS NULL)")
+                    params.append(str(age))
+                if gender is not None: 
+                    sql_parts.append("(gender = ? OR gender IS NULL)")
+                    params.append(str(gender))
+                if race is not None: 
+                    sql_parts.append("(race = ? OR race IS NULL)")
+                    params.append(str(race))
 
+                query = f"SELECT person_id FROM PersonsMeta WHERE {' AND '.join(sql_parts)}"
+                cur = await self.db.execute(query, params)
+                candidates = [row[0] for row in await cur.fetchall()]
+
+                if not candidates:
+                    logger.info("No candidates after metadata filtering.")
+                    return None
+
+            # --- Face matching ---
+            if nface is not None and candidates:
+                placeholders = ",".join("?" for _ in candidates)
+                k_face = min(self.top_k, len(candidates), 5)
+                sql_face = (
+                    f"SELECT person_id, face_embedding FROM FaceVector"
+                    f" WHERE person_id IN ({placeholders})"
+                    f" AND face_embedding MATCH ? AND k = ?"
+                )
+                async with self.db.execute(sql_face, candidates + [nface.tobytes(), k_face]) as cur:
+                    face_rows = await cur.fetchall()
+
+                if face_rows:
+                    ids, vecs = zip(*[(pid, np.frombuffer(buf, dtype=np.float32)) for pid, buf in face_rows])
+                    sims = cosine_similarity(np.stack(vecs), nface.reshape(1, -1)).ravel()
+                    best_idx = int(np.argmax(sims))
+                    best_face_pid, best_face_sim = ids[best_idx], float(sims[best_idx])
+
+                    if best_face_sim >= self.face_threshold:
+                        async with self.db.execute(
+                            "SELECT face_vec FROM FaceIDBankVec WHERE person_id = ? AND face_vec MATCH ? AND k = 1",
+                            (best_face_pid, nface.tobytes())
+                        ) as bank_cur:
+                            row = await bank_cur.fetchone()
+
+                        if row:
+                            bank_vec = np.frombuffer(row[0], dtype=np.float32)
+                            sim_bank = cosine_similarity(bank_vec.reshape(1, -1), nface.reshape(1, -1)).ravel()[0]
+                            if sim_bank >= self.hard_face_threshold:
+                                logger.info(f"[FACEID] match passed for {best_face_pid} (sim={sim_bank:.4f}) in {time.time()-start:.2f}s")
+                                return best_face_pid
+
+            # --- Kalman filter matching ---
             if bbox_data is not None and frame_id is not None:
                 matched_pid = self.tracking_manager.match(bbox_data, frame_id, nf)
                 if matched_pid is not None:
-                    logger.info(f"MATCH ID with kalman filter: {matched_pid}")
-                    # có thể thêm bước kiểm tra metadata/DB nếu muốn, hoặc chấp nhận ngay:
+                    logger.info(f"[KALAM FILTER] MATCH ID with kalman filter: {matched_pid}")
                     return matched_pid
                 else:
-                    logger.info("NO-MACTH_ID with kalman filter")
+                    logger.info("NO-MATCH_ID with kalman filter")
 
-            async with self.db_lock:
-                # 4. Metadata filter
-                query = """
-                    SELECT person_id FROM PersonsMeta
-                    WHERE ((? IS NULL) OR (age = ? OR age IS NULL))
-                    AND   ((? IS NULL) OR (gender = ? OR gender IS NULL))
-                    AND   ((? IS NULL) OR (race = ? OR race IS NULL)) 
-                """
-                params = [new_age, new_age, new_gender, new_gender, new_race, new_race]
-                cur = await self.db.execute(query, params)
-                candidates = [row[0] for row in await cur.fetchall()]
-                # logger.info(f"Metadata filter → {len(candidates)} candidates")
-                if not candidates:
-                    # logger.info(f"No candidates found for age={new_age}, gender={new_gender}, race={new_race}")
-                    return None 
-
-                # Bước 2: Ưu tiên face_embedding
-                best_face_pid = None
-                best_face_sim = 0.0
-                if nface is not None:
-                    placeholders = ",".join("?" for _ in candidates)
-                    async with self.db.execute(
-                        f"SELECT person_id, face_embedding FROM FaceVector WHERE person_id IN ({placeholders})",
-                        candidates
-                    ) as cur:
-                        face_rows = await cur.fetchall()
-                    if face_rows:
-                        ids, face_vecs = [], []
-                        for pid, buf in face_rows:
-                            if buf:
-                                vec = np.frombuffer(buf, dtype=np.float32)
-                                if vec.ndim == 1:
-                                    ids.append(pid)
-                                    face_vecs.append(vec)
-                                else:
-                                    logger.error(f"[{self.device_id}] face_embedding cho {pid} không phải mảng 1 chiều")
-                        if face_vecs:
-                            face_vecs = np.stack(face_vecs, axis=0)
-                            face_sims = cosine_similarity(face_vecs, nface.reshape(1, -1)).ravel()
-                            best_idx = int(np.argmax(face_sims))
-                            best_face_pid, best_face_sim = ids[best_idx], float(face_sims[best_idx])
-
-                            if best_face_sim >= self.face_threshold:
-                                logger.info(f"Khớp face_embedding {best_face_pid} với sim={best_face_sim:.4f} trong {time.time()-start:.2f}s")
-                                return best_face_pid
-
-                # 5. Body-color filter (nếu có), ngược lại cho qua hết
-                if nc is not None:
-                    placeholders = ",".join("?" for _ in candidates)
-                    k = min(self.top_k, len(candidates))  # Thêm logic này
-                    sql = f"""
-                        SELECT person_id, distance FROM PersonsVec
-                        WHERE person_id IN ({placeholders})
-                        AND body_color_mean MATCH ? AND k = ?
-                    """
-                    cur = await self.db.execute(sql, candidates + [nc.tobytes(), k]) 
-                    color_scores = [
-                        (pid, 1 - dist)
-                        for pid, dist in await cur.fetchall()
-                        if 1 - dist > self.color_threshold
-                    ]
-                    # logger.info(f"Body color filter → {len(color_scores)} candidates above threshold")
-                    if not color_scores:
-                        return None
-                    pids = [pid for pid, _ in color_scores]
-                else:
-                    pids = candidates
-
-
-                # 6. Fetch feature vectors batch
-                placeholders = ",".join("?" for _ in pids)
-                cur = await self.db.execute(
-                    f"SELECT person_id, feature_mean FROM PersonsVec WHERE person_id IN ({placeholders})",
-                    pids
+            # --- Feature vector matching ---
+            if nf is not None and candidates:
+                placeholders = ",".join("?" for _ in candidates)
+                k_feat = min(self.top_k, len(candidates), 5)
+                sql_feat = (
+                    f"SELECT person_id, feature_mean FROM PersonsVec"
+                    f" WHERE person_id IN ({placeholders})"
+                    f" AND feature_mean MATCH ? AND k = ?" 
                 )
-                rows = await cur.fetchall()
-                ids, vecs = zip(*[
-                    (pid, np.frombuffer(buf, dtype=np.float32))
-                    for pid, buf in rows
-                ])
-                ids = list(ids)
-                vecs = np.stack(vecs, axis=0)
-                if len(ids) < len(pids):
-                    missing = set(pids) - set(ids)
-                    logger.warning(f"Missing feature vectors for pids: {missing}") 
+                async with self.db.execute(sql_feat, candidates + [nf.tobytes(), k_feat]) as cur:
+                    feat_rows = await cur.fetchall()
 
-                # 8. Batch cosine similarity & select best
-                sims = cosine_similarity(vecs, nf.reshape(1, -1)).ravel()  # luôn trả về 1-d array
-                best_idx = int(np.argmax(sims))
-                best_pid, best_sim = ids[best_idx], float(sims[best_idx])
+                if feat_rows:
+                    ids, vecs = zip(*[(pid, np.frombuffer(buf, dtype=np.float32)) for pid, buf in feat_rows])
+                    sims = cosine_similarity(np.stack(vecs), nf.reshape(1, -1)).ravel()
+                    best_idx = int(np.argmax(sims))
+                    best_pid, best_sim = ids[best_idx], float(sims[best_idx])
 
-                if best_sim < self.feature_threshold:
-                    logger.info(f"Best pid={best_pid} with sim={best_sim:.4f} but below feature_threshold={self.feature_threshold}")
-                    return None
+                    if best_sim >= self.feature_threshold:
+                        async with self.db.execute(
+                            "SELECT feature_vec FROM FeatureBankVec WHERE person_id = ? AND feature_vec MATCH ? AND k = 1",
+                            (best_pid, nf.tobytes())
+                        ) as feat_cur:
+                            row = await feat_cur.fetchone()
 
-                logger.info(f"Selected pid={best_pid} with sim={best_sim:.4f}") 
-                # logger.info(f"match_id took {time.time()-start:.2f}s")
-                return best_pid
+                        if row:
+                            bank_vec = np.frombuffer(row[0], dtype=np.float32)
+                            sim_bank = cosine_similarity(bank_vec.reshape(1, -1), nf.reshape(1, -1)).ravel()[0]
+                            if sim_bank >= self.hard_feature_threshold:
+                                logger.info(f"[FEATURE] Hard-feature check passed for {best_pid} (sim={sim_bank:.4f})")
+                                return best_pid 
+
+            return None 
+
         except Exception as e:
             logger.exception(f"[DB] Failed to match_id: {e}")
             return None
 
-    # async def match_id(self, new_gender, new_race, new_age, new_body_color, new_feature):
-    #     await self._ensure_db_ready()
-    #     try:
-    #         start = time.time()
-
-    #         # 1. Check inputs
-    #         if new_feature is None and new_body_color is None:
-    #             logger.warning("No feature OR color given for matching.")
-    #             return None
-
-    #         # 2. Normalize feature (nếu có)
-    #         nf = None
-    #         if new_feature is not None:
-    #             arr = np.asarray(new_feature, dtype=np.float32)
-    #             if arr.shape != (512,):
-    #                 raise ValueError("new_feature must be 512-dim")
-    #             nf = self.normalize(arr)
-
-    #         # 3. Preprocess body color (nếu có) 
-    #         nc = None
-    #         if new_body_color is not None:
-    #             bc = np.asarray(new_body_color, dtype=np.float32)
-    #             if bc.shape != (17,3):
-    #                 raise ValueError("new_body_color must be (17,3)")
-    #             nc, _ = self.preprocess_color(bc)
-
-    #         async with self.db_lock:
-    #             # 4. Metadata filter
-    #             query = """
-    #                 SELECT person_id FROM PersonsMeta
-    #                 WHERE ((? IS NULL) OR (age = ? OR age IS NULL))
-    #                 AND   ((? IS NULL) OR (gender = ? OR gender IS NULL))
-    #                 AND   ((? IS NULL) OR (race = ? OR race IS NULL)) 
-    #             """
-    #             params = [new_age, new_age, new_gender, new_gender, new_race, new_race]
-    #             cur = await self.db.execute(query, params)
-    #             candidates = [row[0] for row in await cur.fetchall()]
-    #             # logger.info(f"Metadata filter → {len(candidates)} candidates")
-    #             if not candidates:
-    #                 # logger.info(f"No candidates found for age={new_age}, gender={new_gender}, race={new_race}")
-    #                 return None 
-
-
-    #             # 5. Body-color filter (nếu có), ngược lại cho qua hết
-    #             if nc is not None:
-    #                 placeholders = ",".join("?" for _ in candidates)
-    #                 k = min(self.top_k, len(candidates))  # Thêm logic này
-    #                 sql = f"""
-    #                     SELECT person_id, distance FROM PersonsVec
-    #                     WHERE person_id IN ({placeholders})
-    #                     AND body_color_mean MATCH ? AND k = ?
-    #                 """
-    #                 cur = await self.db.execute(sql, candidates + [nc.tobytes(), k]) 
-    #                 color_scores = [
-    #                     (pid, 1 - (dist**2)/2)
-    #                     for pid, dist in await cur.fetchall()
-    #                     if 1 - (dist**2)/2 > self.color_threshold
-    #                 ]
-    #                 # logger.info(f"Body color filter → {len(color_scores)} candidates above threshold")
-    #                 if not color_scores:
-    #                     return None
-    #                 pids = [pid for pid, _ in color_scores]
-    #             else:
-    #                 pids = candidates
-
-
-    #             # 6. Fetch feature vectors batch
-    #             placeholders = ",".join("?" for _ in pids)
-    #             cur = await self.db.execute(
-    #                 f"SELECT person_id, feature_mean FROM PersonsVec WHERE person_id IN ({placeholders})",
-    #                 pids
-    #             )
-    #             rows = await cur.fetchall()
-    #             ids, vecs = zip(*[
-    #                 (pid, np.frombuffer(buf, dtype=np.float32))
-    #                 for pid, buf in rows
-    #             ])
-    #             ids = list(ids)
-    #             vecs = np.stack(vecs, axis=0)
-    #             if len(ids) < len(pids):
-    #                 missing = set(pids) - set(ids)
-    #                 logger.warning(f"Missing feature vectors for pids: {missing}") 
-
-    #             # 8. Batch cosine similarity & select best
-    #             sims = cosine_similarity(vecs, nf.reshape(1, -1)).ravel()  # luôn trả về 1-d array
-    #             best_idx = int(np.argmax(sims))
-    #             best_pid, best_sim = ids[best_idx], float(sims[best_idx])
-
-    #             if best_sim < self.feature_threshold:
-    #                 logger.info(f"Best pid={best_pid} with sim={best_sim:.4f} but below feature_threshold={self.feature_threshold}")
-    #                 return None
-
-    #             # logger.info(f"Selected pid={best_pid} with sim={best_sim:.4f}") 
-    #             # logger.info(f"match_id took {time.time()-start:.2f}s")
-    #             return best_pid
-    #     except Exception as e:
-    #         logger.exception(f"[DB] Failed to match_id: {e}")
-    #         return None
+##########################################################################################
 
     async def remove_low_person_ids(self, ids_to_remove: list[int]):
         """Xoá các person_id được chỉ định khỏi DB và bộ nhớ."""
@@ -596,6 +414,8 @@ class ReIDManager:
                 for pid in ids_to_remove:
                     self.feature_history.pop(pid, None)
                     self.color_history.pop(pid, None)
+                    if pid in self.tracking_manager.tracks:
+                        del self.tracking_manager.tracks[pid]
                 
                 logger.info(f"[DB] Removed {len(ids_to_remove)} person IDs: {ids_to_remove}")
         except Exception as e:
@@ -690,21 +510,35 @@ class ReIDManager:
             try:
                 logger.info("[DB] Merge temp_id=%s → closest_id=%s", temp_id, closest_id)
 
-                # 1) Fetch and compare metadata
+                # 1) Fetch metadata for both IDs
                 cur = await self.db.execute(
                     "SELECT person_id, age, gender, race FROM PersonsMeta WHERE person_id IN (?, ?);",
                     (temp_id, closest_id)
                 )
                 rows = await cur.fetchall()
                 meta = {row[0]: row[1:] for row in rows}
+
+                # Ensure both entries exist
                 if temp_id not in meta or closest_id not in meta:
                     logger.warning("[DB] Missing PersonsMeta for %s or %s", temp_id, closest_id)
                     return False
-                for field_temp, field_closest in zip(meta[temp_id], meta[closest_id]):
-                    if field_temp is not None and field_closest is not None and field_temp != field_closest:
+
+                # Normalize metadata values: treat string 'None' or empty as None
+                def normalize(fields):
+                    return [
+                        None if (v is None or (isinstance(v, str) and v.strip().lower() == "none")) else v
+                        for v in fields
+                    ]
+
+                meta_temp  = normalize(meta[temp_id])
+                meta_close = normalize(meta[closest_id])
+
+                # Compare fields: if both non-None and unequal, cannot merge
+                for val_temp, val_close in zip(meta_temp, meta_close):
+                    if val_temp is not None and val_close is not None and val_temp != val_close:
                         logger.warning(
                             "[DB] Metadata mismatch — cannot merge: %s vs %s",
-                            meta[temp_id], meta[closest_id]
+                            meta_temp, meta_close
                         )
                         return False
 
@@ -741,7 +575,7 @@ class ReIDManager:
         # Merge in-memory feature and color histories (only after DB success)
         if temp_id in self.feature_history:
             self.feature_history.setdefault(closest_id, [])
-            self.feature_history[closest_id].extend(self.feature_history.pop(temp_id))
+            self.feature_history[closest_id].extend(self.feature_history.pop(temp_id)) 
         if temp_id in self.color_history:
             self.color_history.setdefault(closest_id, [])
             self.color_history[closest_id].extend(self.color_history.pop(temp_id))
@@ -753,7 +587,7 @@ class ReIDManager:
         Tìm person_id gần nhất với temp_id dựa trên feature_history trong RAM.
         Dùng batch cosine_similarity từ sklearn để tăng tốc.
         """
-        history = self.feature_history.get(temp_id)
+        history = self.feature_history.get(temp_id) 
         if not history:
             logger.warning(f"[find_closest_by_id] Không có history cho temp_id={temp_id}")
             return None, 0.0
@@ -785,7 +619,37 @@ class ReIDManager:
         return ids[best_idx], float(sims[best_idx]) 
 
 
+################################################################
+
+    async def get_person_meta(self, person_id: str) -> dict | None:
+        """
+        Query the database for metadata of a person by person_id.
+
+        Returns a dictionary with keys corresponding to the PersonsMeta columns
+        or None if the person_id is not found or on error.
+        """
+        await self._ensure_db_ready()
+        try:
+            async with self.db_lock:
+                cursor = await self.db.execute(
+                    "SELECT person_id, age, gender, race, height_mean FROM PersonsMeta WHERE person_id = ?;", 
+                    (person_id,)
+                )
+                row = await cursor.fetchone()
+            if row is None:
+                logger.info(f"No metadata found for person_id={person_id}")
+                return None
+
+            # Map column order to keys
+            keys = ["person_id", "age", "gender", "race", "height_mean"] 
+            return dict(zip(keys, row))
+        except Exception as e:
+            logger.exception(f"[DB] Failed to query person meta for {person_id}: {e}")
+            return None
+
 def compute_ema(history: deque) -> np.ndarray | None:
+    if not history:  # Kiểm tra này đúng cho cả None và list/deque rỗng
+        return None
     n = len(history)
     if n == 0:
         return None

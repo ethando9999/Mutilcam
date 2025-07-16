@@ -89,10 +89,12 @@ class FaceAnalyze:
         start = time.time()
 
         # Detect & align
-        face_chip, face_roi = self.detect_and_align(image)
-        if face_chip is None:
+        res = self.detect_and_align(image)
+        if res is None:
             logger.info("No face detected in analyze")
             return None, None, None, None, None
+
+        face_chip, face_roi = res
 
         # Process face attributes asynchronously
         try:

@@ -1,133 +1,126 @@
+# file: python/run_new.py (Tối ưu sử dụng ProcessID thay cho start_id/PersonReID)
+
 import argparse
 import asyncio
 import os
-import pika
 import psutil
-from utils.create_id_db import create_database
-from utils.logging_python_orangepi import setup_logging, get_logger
-from id.main_id import start_id, PersonReID
-from core.put_frame import start_putter
-from core.processing import start_processor
+
+# Import các module của dự án
+from database.create_db import create_database
+from id.process_id import ProcessID
+import config
+from core.socket_sender import start_socket_sender
 
 # Thiết lập logging
+from utils.logging_python_orangepi import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
 
-async def monitor_queue(queue, queue_name):
+async def monitor_queue(queue: asyncio.Queue, queue_name: str):
     while True:
-        logger.info(f"Kích thước hàng đợi {queue_name}: {queue.qsize()}/{queue.maxsize}")
-        await asyncio.sleep(5)
+        try:
+            max_size_str = f"/{queue.maxsize}" if queue.maxsize > 0 else ""
+            logger.info(f"Kích thước hàng đợi {queue_name}: {queue.qsize()}{max_size_str}")
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            break
 
 async def monitor_system():
     while True:
-        cpu_percent = psutil.cpu_percent(interval=1)
-        memory = psutil.virtual_memory()
-        logger.info(f"Tải hệ thống - CPU: {cpu_percent:.1f}%, Bộ nhớ: {memory.percent:.1f}%")
-        await asyncio.sleep(5)
-
-async def init_rabbitmq_queue(queue_name='frame_queue', max_retries=5, retry_delay=5):
-    """Khởi tạo hàng đợi RabbitMQ với cơ chế thử lại nếu thất bại."""
-    credentials = pika.PlainCredentials('new_user', '123456')
-    parameters = pika.ConnectionParameters(host='localhost', credentials=credentials)
-    for attempt in range(max_retries):
         try:
-            connection = pika.BlockingConnection(parameters)
-            channel = connection.channel()
-            channel.queue_delete(queue=queue_name)
-            logger.info(f"Đã xóa hàng đợi RabbitMQ: {queue_name}")
-            channel.queue_declare(queue=queue_name, durable=True)
-            connection.close()
-            logger.info("Hàng đợi RabbitMQ đã được khởi tạo thành công.")
-            return True
-        except Exception as e:
-            logger.error(f"Không thể khởi tạo hàng đợi RabbitMQ (lần thử {attempt + 1}/{max_retries}): {str(e)}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-            else:
-                logger.error("Không thể khởi tạo hàng đợi RabbitMQ sau nhiều lần thử.")
-                return False
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            logger.info(f"Tải hệ thống - CPU: {cpu_percent:.1f}%, Bộ nhớ: {memory.percent:.1f}%")
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            break
 
 async def main(args):
-    logger.info("Khởi động ứng dụng chính...")
+    logger.info("Khởi động ứng dụng chính…")
 
-    # Đường dẫn đến các tệp cơ sở dữ liệu
-    temp_db_path = 'temp.db'
-    main_db_path = 'database.db'
+    device_id = args.device_id
+    logger.info(f"Đang chạy ở chế độ device_id = {device_id}")
 
-    # Kiểm tra và quản lý cơ sở dữ liệu với cờ --new-db
-    if args.new_db:
-        for db_path in [temp_db_path, main_db_path]:
-            if os.path.exists(db_path):
-                os.remove(db_path)
-                logger.info(f"Đã xóa cơ sở dữ liệu hiện có: {db_path}")
-            await create_database(db_path)
-            logger.info(f"Đã tạo cơ sở dữ liệu mới: {db_path}")
+    if "opi" in device_id:
+        from core.put_RGBD import start_putter
+        from core.processing_RGBD import start_processor
+        ID_CONFIG = config.OPI_CONFIG
     else:
-        for db_path in [temp_db_path, main_db_path]:
-            if not os.path.exists(db_path):
-                await create_database(db_path)
-                logger.info(f"Cơ sở dữ liệu không được tìm thấy, đã tạo cơ sở dữ liệu mới: {db_path}")
-            else:
-                logger.info(f"Sử dụng cơ sở dữ liệu hiện có: {db_path}")
-
-    # Khởi tạo hàng đợi RabbitMQ với thử lại
-    if not await init_rabbitmq_queue():
-        logger.error("Không thể tiếp tục do lỗi khởi tạo RabbitMQ.")
+        logger.error(f"device_id không hợp lệ: '{device_id}'.") 
         return
 
-    # Khởi tạo các hàng đợi asyncio
-    frame_queue = asyncio.Queue(maxsize=200)
-    processing_queue = asyncio.Queue(maxsize=100)
+    db_path = ID_CONFIG.get("db_path")
+    if args.new_db:
+        logger.info(f"Cờ --new-db được bật. Đang tạo lại cơ sở dữ liệu tại '{db_path}'.")
+        for suffix in ["", "-shm", "-wal"]:
+            if os.path.exists(f"{db_path}{suffix}"): os.remove(f"{db_path}{suffix}")
+        await create_database(db_path=db_path)
+    elif not os.path.exists(db_path):
+        await create_database(db_path=db_path)
 
-    # Khởi tạo PersonReID
-    person_reid = PersonReID(
-        output_dir=args.output_dir,
-        feature_threshold=args.feature_threshold,
-        color_threshold=args.color_threshold,
-        temp_db_path=temp_db_path,
-        main_db_path=main_db_path,
-        rabbitmq_url="amqp://new_user:123456@localhost/"
-    )
+    frame_queue = asyncio.Queue(maxsize=1000)
+    processing_queue = asyncio.Queue(maxsize=200)
+    people_count_queue = asyncio.Queue(maxsize=1)
+    height_queue = asyncio.Queue(maxsize=1)
+    id_socket_queue = asyncio.Queue()
+
+    all_tasks = []
 
     try:
-        putter_task = asyncio.create_task(start_putter(frame_queue))
-        processor_task = asyncio.create_task(start_processor(frame_queue, processing_queue))
-        id_task = asyncio.create_task(start_id(processing_queue, person_reid))
-        monitor_task = asyncio.create_task(monitor_queue(frame_queue, "Frame"))
-        monitor_system_task = asyncio.create_task(monitor_system())
+        # Khởi tạo process handler
+        processor = ProcessID({
+            **ID_CONFIG,
+            "device_id": device_id,
+            "db_path": db_path
+        },
+        processing_queue,
+        id_socket_queue
+        )
 
-        await asyncio.gather(putter_task, processor_task, id_task, monitor_task, monitor_system_task)
-    except KeyboardInterrupt:
-        logger.info("Đang tắt chương trình một cách an toàn...")
-    except asyncio.CancelledError:
-        logger.info("Các tác vụ đã bị hủy.")
+        # 1. Putter
+        camera_id = ID_CONFIG.get("rgb_camera_id", 0)
+        all_tasks.append(asyncio.create_task(start_putter(frame_queue, camera_id=camera_id)))
+
+        # 2. Processor
+        calib_path = ID_CONFIG.get("calib_file_path")
+        if not calib_path or not os.path.exists(calib_path):
+            raise FileNotFoundError(f"LỖI: File hiệu chỉnh không được tìm thấy tại '{calib_path}'.")
+
+        all_tasks.append(asyncio.create_task(start_processor(
+            frame_queue, processing_queue, people_count_queue, height_queue, calib_path
+        )))
+
+        # 3. ID xử lý
+        all_tasks.append(asyncio.create_task(processor.run()))
+
+        # 4. WebSocket
+        all_tasks.append(asyncio.create_task(start_socket_sender(people_count_queue, ID_CONFIG["SOCKET_COUNT_URI"])))
+        all_tasks.append(asyncio.create_task(start_socket_sender(height_queue, ID_CONFIG["SOCKET_HEIGHT_URI"])))
+        all_tasks.append(asyncio.create_task(start_socket_sender(id_socket_queue, ID_CONFIG["SOCKET_ID_URI"])))
+
+        # 5. Giám sát
+        all_tasks.append(asyncio.create_task(monitor_queue(frame_queue, "Frame")))
+        all_tasks.append(asyncio.create_task(monitor_queue(processing_queue, "Processing")))
+        all_tasks.append(asyncio.create_task(monitor_queue(id_socket_queue, "ID Socket")))
+
+        logger.info(f"Đã khởi tạo {len(all_tasks)} tác vụ. Bắt đầu vòng lặp chính.")
+        await asyncio.gather(*all_tasks)
+
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Phát hiện tín hiệu dừng. Đang tắt chương trình...")
     except Exception as e:
-        logger.error(f"Lỗi nghiêm trọng xảy ra: {str(e)}")
-        raise
+        logger.error(f"Lỗi không mong muốn ở cấp cao nhất: {e}", exc_info=True)
     finally:
-        putter_task.cancel()
-        processor_task.cancel()
-        id_task.cancel()
-        monitor_task.cancel()
-        monitor_system_task.cancel()
-        await asyncio.gather(putter_task, processor_task, id_task, monitor_task, monitor_system_task, return_exceptions=True)
-        if not frame_queue.empty():
-            logger.info("Đang xóa hàng đợi khung...")
-            while not frame_queue.empty():
-                frame_queue.get_nowait()
-        logger.info("Tất cả tài nguyên đã được dọn dẹp.")
+        logger.info("Bắt đầu quá trình dọn dẹp tài nguyên...")
+        for task in all_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*all_tasks, return_exceptions=True)
+        logger.info("Tất cả tài nguyên đã được dọn dẹp. Chương trình kết thúc.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Chạy hệ thống ReID với quản lý cơ sở dữ liệu.")
-    parser.add_argument('--new-db', action='store_true', help='Xóa và tạo lại cả TempDB và MainDB nếu đã tồn tại.')
-    parser.add_argument('--output_dir', type=str, default='output_frames_id', help='Thư mục lưu ảnh crop')
-    parser.add_argument('--feature_threshold', type=float, default=0.7, help='Ngưỡng đặc trưng')
-    parser.add_argument('--color_threshold', type=float, default=0.5, help='Ngưỡng màu sắc')
+    parser = argparse.ArgumentParser(description="Chạy hệ thống ReID.")
+    parser.add_argument("--new-db", action="store_true", help="Xóa và tạo lại cơ sở dữ liệu.")
+    parser.add_argument("--device-id", type=str, default="opi", help="ID của thiết bị (chứa 'opi').")
     args = parser.parse_args()
-
-    try:
-        asyncio.run(main(args))
-    except KeyboardInterrupt:
-        logger.info("Chương trình bị dừng bởi người dùng.")
-    except Exception as e:
-        logger.error(f"Chương trình dừng do lỗi: {str(e)}")
+    asyncio.run(main(args))

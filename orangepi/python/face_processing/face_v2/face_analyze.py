@@ -1,5 +1,4 @@
-from utils.logging_python_orangepi import get_logger
-logger = get_logger(__name__)
+
 
 from .mdp_face_detection import FaceDetection
 from .dlib_aligner import FaceAligner
@@ -14,6 +13,9 @@ import os
 import glob
 import datetime
 
+from utils.logging_python_orangepi import get_logger 
+logger = get_logger(__name__)
+
 from config import FACE_CONFIG, OPI_CONFIG
 
 class FaceAnalyze:
@@ -27,7 +29,7 @@ class FaceAnalyze:
         self.face_detection = FaceDetection(min_detection_confidence=self.face_conf)
         self.fairface_predictor = FairFacePredictor(
             model_selection=0,
-            r_conf=self.race_conf,
+            r_conf=self.race_conf, 
             g_conf=self.gender_conf,
             a_conf=self.age_conf
         )
@@ -35,7 +37,7 @@ class FaceAnalyze:
         self.face_id = MobileFaceNet()
         self.fps_avg = 0.0
         self.call_count = 0
-
+        logger.info("Init FaceAnalyze successfully!")  
 
     async def processing_face(self, face_image):  
         """
@@ -121,9 +123,10 @@ class FaceAnalyze:
         # Bước 1: Phát hiện và căn chỉnh khuôn mặt
         face_chip = self.detect_and_align(image)
         if face_chip is None:
-            logger.info("No face detected in analyze")
+            logger.info("No face detected in analyze") 
             return None, None, None, None, None
         
+        logger.info("Có face đang lưu lại")
         await self.save_face_chip_async(face_chip)  # ✅ lưu bất đồng bộ
 
         # Bước 2: Xử lý nhận diện và phân tích khuôn mặt

@@ -15,6 +15,11 @@ vec_extension_path: str = config.VEC0_PATH
 FEATURE_DIMENSIONS: int = config.FEATURE_DIMENSIONS
 FACE_DIMENSIONS: int = config.FACE_DIMENSIONS
 
+import os
+import aiosqlite
+# Giả định các biến này đã được định nghĩa ở nơi khác
+# from your_config import logger, vec_extension_path, FEATURE_DIMENSIONS, FACE_DIMENSIONS
+
 async def create_database(
     db_path: str = "database.db",
 ) -> bool:
@@ -73,8 +78,7 @@ async def create_database(
                 DROP TABLE IF EXISTS PersonsVec;
                 CREATE VIRTUAL TABLE PersonsVec USING vec0 (
                     person_id        TEXT PRIMARY KEY,
-                    feature_mean     float[{FEATURE_DIMENSIONS}] DISTANCE cosine,
-                    -- body_color_mean  float[51]  DISTANCE cosine
+                    feature_mean     float[{FEATURE_DIMENSIONS}] DISTANCE cosine
                 );
 
                 DROP TABLE IF EXISTS FaceVector;
@@ -104,19 +108,14 @@ async def create_database(
                     FOREIGN KEY (person_id) REFERENCES Persons(person_id) ON DELETE CASCADE
                 );
 
-                -- Cameras & Frames
-                CREATE TABLE IF NOT EXISTS Cameras (
-                    camera_id   TEXT PRIMARY KEY,
-                    location    TEXT,
-                    resolution  TEXT,
-                    model       TEXT
-                );
+                -- --- BẢNG CAMERAS ĐÃ BỊ XÓA BỎ ---
+                -- CREATE TABLE IF NOT EXISTS Cameras ( ... );
+
+                -- Bảng Frames
                 CREATE TABLE IF NOT EXISTS Frames (
                     frame_id    TEXT PRIMARY KEY,
                     timestamp   REAL NOT NULL,
-                    camera_id   TEXT NOT NULL,
-                    frame_path  TEXT,
-                    FOREIGN KEY (camera_id) REFERENCES Cameras(camera_id) ON DELETE SET NULL
+                    frame_path  TEXT
                 );
 
                 -- Detections & Appearance
@@ -124,13 +123,11 @@ async def create_database(
                     detection_id        INTEGER PRIMARY KEY AUTOINCREMENT,
                     person_id           TEXT NOT NULL,
                     timestamp           REAL NOT NULL,
-                    camera_id           TEXT,
                     frame_id            TEXT,
                     emotion             TEXT,
                     confidence_emotion  REAL,
                     bbox                TEXT,
                     FOREIGN KEY (person_id) REFERENCES Persons(person_id) ON DELETE CASCADE,
-                    FOREIGN KEY (camera_id) REFERENCES Cameras(camera_id) ON DELETE SET NULL,
                     FOREIGN KEY (frame_id)  REFERENCES Frames(frame_id) ON DELETE SET NULL
                 );
                 CREATE TABLE IF NOT EXISTS Appearance (
@@ -150,11 +147,9 @@ async def create_database(
                 -- Indexes
                 CREATE INDEX IF NOT EXISTS idx_meta_age_gender_race ON PersonsMeta(age, gender, race);
                 CREATE INDEX IF NOT EXISTS idx_det_person     ON Detections(person_id);
-                CREATE INDEX IF NOT EXISTS idx_det_camera     ON Detections(camera_id);
                 CREATE INDEX IF NOT EXISTS idx_det_time       ON Detections(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_app_person     ON Appearance(person_id);
                 CREATE INDEX IF NOT EXISTS idx_app_detection  ON Appearance(detection_id);
-                CREATE INDEX IF NOT EXISTS idx_frames_camera  ON Frames(camera_id);
                 CREATE INDEX IF NOT EXISTS idx_frames_time    ON Frames(timestamp);
                 """
             )

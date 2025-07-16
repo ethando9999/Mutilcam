@@ -112,7 +112,7 @@ class SlaveCommunicator:
                 return None, None
 
 class FramePutter:
-    def __init__(self, rgb_camera_id: int, target_fps: int = 1):
+    def __init__(self, rgb_camera_id: int, target_fps: int = 10):
         self.stop_event = asyncio.Event()
         self.rgb_camera_id = rgb_camera_id
         
@@ -183,6 +183,7 @@ class FramePutter:
                 
                 data_packet = (rgb_path, depth_path, amp_path)
                 await frame_queue.put(data_packet)
+                # logger.info("Đã put vào frame_queue")
 
                 # --- THÊM MỚI: Logic điều chỉnh tốc độ ---
                 # Tính thời gian xử lý của vòng lặp hiện tại

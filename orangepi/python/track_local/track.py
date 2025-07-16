@@ -21,14 +21,14 @@ class TrackingManager:
     """
     def __init__(self,
                  gating_threshold: float = CHI2INV95_4,
-                 max_time_lost: int = 30,
-                 proximity_thresh: float = 0.6,
-                 appearance_thresh: float = 0.4,
+                 max_time_lost: int = 1000,
+                 proximity_thresh: float = 0.5,
+                 appearance_thresh: float = 0.6,
                  feature_history_len: int = 5):
         """
         kalman_filter: instance của KalmanFilter2D đã định nghĩa.
         gating_threshold: squared Mahalanobis threshold (dùng full-state, do measurement dim=4).
-        max_time_lost: số frame không update tối đa trước khi xóa track.
+        max_time_lost: số frame không update tối đa trước khi xóa track. 
         proximity_thresh: ngưỡng IoU tối thiểu để candidate (ví dụ 0.7).
         appearance_thresh: ngưỡng cosine similarity tối thiểu để match appearance.
         feature_history_len: độ dài lịch sử feature để moving average.

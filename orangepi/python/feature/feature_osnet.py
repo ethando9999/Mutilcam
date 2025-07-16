@@ -74,6 +74,7 @@ class FeatureModel:
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225]),
         ])
+        logger.info("Init FaceAnalyze successfully!")
 
     def extract_feature(self, image: np.ndarray) -> np.ndarray:
         try:

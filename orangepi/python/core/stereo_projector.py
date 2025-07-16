@@ -3,6 +3,7 @@
 import numpy as np
 import cv2
 import os
+import math
 import logging
 
 # Thiết lập logging
@@ -16,17 +17,37 @@ except ImportError:
 class StereoProjector:
     """
     Quản lý việc chiếu điểm và hộp giới hạn giữa camera RGB và ToF.
-    Phiên bản này được tối ưu hóa về tốc độ và khả năng cấu hình.
+    Phiên bản này được tối ưu hóa về tốc độ và khả năng cấu hình,
+    bao gồm cả khả năng điều chỉnh hiệu chỉnh động.
     """
     def __init__(self, calib_file_path: str,
-                 min_depth_mm: int = 450,    # Điều chỉnh để chấp nhận dữ liệu giả
+                 min_depth_mm: int = 450,
                  max_depth_mm: int = 8000,
                  min_valid_pixels: int = 100,
                  max_std_dev: float = 5.0,
-                 assumed_depth_mm: float = 1800.0):
+                 assumed_depth_mm: float = 1800.0,
+                 # --- Tham số điều chỉnh mới ---
+                 adjustment_shift_px: float | None = None,
+                 adjustment_angle_from_vertical_deg: float | None = None):
         
-        self.params = self._load_calibration(calib_file_path)
+        # 1. Tải các tham số hiệu chỉnh gốc
+        base_params = self._load_calibration(calib_file_path)
         
+        # 2. Áp dụng điều chỉnh nếu được cung cấp
+        if adjustment_shift_px is not None and adjustment_angle_from_vertical_deg is not None:
+            logger.info(
+                f"Đang áp dụng điều chỉnh hiệu chỉnh: "
+                f"độ dịch chuyển = {adjustment_shift_px}px, "
+                f"góc so với phương thẳng đứng = {adjustment_angle_from_vertical_deg} độ."
+            )
+            self.params = self._adjust_tof_principal_point(
+                base_params,
+                shift_magnitude_px=adjustment_shift_px,
+                angle_from_vertical_deg=adjustment_angle_from_vertical_deg
+            )
+        else:
+            self.params = base_params
+
         # Trích xuất các tham số camera để truy cập nhanh
         self.mtx_rgb = self.params['mtx_rgb']
         self.dist_rgb = self.params['dist_rgb']
@@ -55,13 +76,69 @@ class StereoProjector:
         try:
             logger.info(f"Đang tải dữ liệu hiệu chỉnh stereo từ '{file_path}'...")
             with np.load(file_path) as data:
-                params = {key: data[key] for key in data}  
+                # Tạo một bản sao để đảm bảo dữ liệu gốc không bị thay đổi
+                params = {key: data[key].copy() for key in data}
             logger.info("Tải dữ liệu hiệu chỉnh stereo thành công.")
             return params
         except Exception as e:
             logger.error(f"Lỗi khi đọc file hiệu chỉnh '{file_path}': {e}", exc_info=True)
             raise
 
+    # --- HÀM MỚI ĐỂ ĐIỀU CHỈNH HIỆU CHỈNH ---
+    @staticmethod
+    def _adjust_tof_principal_point(
+            params: dict, 
+            shift_magnitude_px: float, 
+            angle_from_vertical_deg: float) -> dict:
+        """
+        Điều chỉnh tâm quang học của camera ToF để bù cho sự lệch vật lý.
+
+        Sự lệch này được mô hình hóa như một vector dịch chuyển 2D trên mặt phẳng ảnh ToF.
+        
+        Args:
+            params (dict): Từ điển chứa các tham số hiệu chỉnh gốc.
+            shift_magnitude_px (float): Độ lớn của vector dịch chuyển (tính bằng pixel).
+            angle_from_vertical_deg (float): Hướng của vector dịch chuyển,
+                được đo bằng độ so với phương thẳng đứng (trục y, hướng xuống).
+
+        Returns:
+            dict: Từ điển chứa các tham số hiệu chỉnh đã được điều chỉnh.
+        """
+        # Ma trận nội tại của ToF: [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+        mtx_tof = params['mtx_tof']
+        original_cx = mtx_tof[0, 2]
+        original_cy = mtx_tof[1, 2]
+
+        # Chuyển đổi góc từ độ sang radian
+        # Trong hệ tọa độ ảnh, trục y là phương thẳng đứng, trục x là phương ngang.
+        angle_rad = math.radians(angle_from_vertical_deg)
+
+        # Tính toán độ dịch chuyển theo trục x và y
+        # sin(angle) cho thành phần ngang, cos(angle) cho thành phần dọc
+        dx = shift_magnitude_px * math.sin(angle_rad)
+        dy = shift_magnitude_px * math.cos(angle_rad)
+
+        logger.info(f"Tâm ToF gốc (cx, cy): ({original_cx:.2f}, {original_cy:.2f})")
+        logger.info(f"Độ dịch chuyển (dx, dy) được tính toán: ({dx:.2f}, {dy:.2f})")
+
+        # Áp dụng sự dịch chuyển vào tâm quang học (cx, cy)
+        # Tạo một bản sao để không sửa đổi mảng gốc trong từ điển
+        adjusted_mtx_tof = mtx_tof.copy()
+        adjusted_mtx_tof[0, 2] += dx  # Cập nhật cx
+        adjusted_mtx_tof[1, 2] += dy  # Cập nhật cy
+
+        # Cập nhật lại từ điển tham số
+        adjusted_params = params.copy()
+        adjusted_params['mtx_tof'] = adjusted_mtx_tof
+        
+        logger.info(
+            f"Tâm ToF mới (cx, cy): "
+            f"({adjusted_mtx_tof[0, 2]:.2f}, {adjusted_mtx_tof[1, 2]:.2f})"
+        )
+
+        return adjusted_params
+
+    # --- Các hàm còn lại không thay đổi ---
     def _project_points_vectorized(self, rgb_points_2d: np.ndarray, depth_mm: float) -> np.ndarray | None:
         """
         Chiếu một mảng các điểm 2D từ hệ RGB sang hệ ToF bằng phép tính vector hóa.
@@ -104,13 +181,11 @@ class StereoProjector:
             try:
                 tof_corners = self._project_points_vectorized(rgb_corners, current_depth_mm)
                 if tof_corners is None:
-                    # Nếu chiếu thất bại ở bước tinh chỉnh, trả về kết quả từ bước trước đó (nếu có)
                     return (current_depth_mm, "OK") if i > 0 else (None, "Lỗi chiếu")
             except Exception as e:
                 logger.warning(f"Lỗi trong bước chiếu (lần {i}): {e}")
                 return (current_depth_mm, "OK") if i > 0 else (None, "Lỗi chiếu")
 
-            # Trích xuất ROI và lọc điểm
             tof_xmin, tof_ymin = np.min(tof_corners, axis=0)
             tof_xmax, tof_ymax = np.max(tof_corners, axis=0)
             
@@ -130,10 +205,8 @@ class StereoProjector:
             if np.std(valid_depths) < self.MIN_STD_DEV:
                 return None, f"Nhiễu phẳng (std={np.std(valid_depths):.1f})"
             
-            # Cập nhật khoảng cách ước tính cho lần lặp tiếp theo
             current_depth_mm = np.median(valid_depths)
 
-        # Sau khi tinh chỉnh, kiểm tra lại lần cuối
         if not (self.MIN_DEPTH_MM < current_depth_mm < self.MAX_DEPTH_MM):
             return None, f"D không hợp lệ ({current_depth_mm:.0f})"
             
@@ -167,3 +240,10 @@ class StereoProjector:
         tof_ymax = min(tof_h, int(np.max(tof_corners_projected[:, 1])))
 
         return (tof_xmin, tof_ymin, tof_xmax, tof_ymax)
+    
+if __name__ == "__main__":
+    projector_adjusted = StereoProjector(
+        calib_file_path=calib_file,
+        adjustment_shift_px=50.0,
+        adjustment_angle_from_vertical_deg=25.0
+    )

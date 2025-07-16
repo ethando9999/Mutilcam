@@ -11,7 +11,7 @@ current_path = os.getcwd()
 
 
 # MODEL_PATH = "models/yolo11n-pose_ncnn_model"
-MODEL_PATH = "models/yolo11s-pose_rknn_model"
+MODEL_PATH = "models/yolo11n-pose_rknn_model"
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), MODEL_PATH)
 

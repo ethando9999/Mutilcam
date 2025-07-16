@@ -133,8 +133,6 @@ class FrameProcessor:
                     height_task, body_parts_task, projection_task
                 )
 
-                if not est_height_m: return None
-                
                 if tof_box_projected:
                     debug_base_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S%f')}_F{frame_id}"
                     asyncio.create_task(self.save_debug_images(debug_base_name, rgb_frame.copy(), tof_depth_map.copy(), box, tof_box_projected))
@@ -146,7 +144,8 @@ class FrameProcessor:
                     head_kp_3d = self.stereo_projector._back_project_rgb_to_3d(head_kp, distance_mm)
                     world_point_3d = head_kp_3d[0]
                 
-                logger.info(f"✅✅ Xử lý hoàn tất: Khoảng cách={distance_m:.2f}m, Chiều cao={est_height_m:.2f}m ({height_status})")
+                logger.info(f"✅✅ Xử lý hoàn tất: Khoảng cách={distance_m:.2f}m, "
+                            f"Chiều cao={(f'{est_height_m:.2f}' if est_height_m is not None else 'None')}m ({height_status})")
 
                 return {
                     "frame_id": frame_id, 
@@ -260,13 +259,21 @@ class FrameProcessor:
                     valid_final_results = [res for res in final_results if res and not isinstance(res, Exception)]
                     
                     if valid_final_results:
-                        heights_cm = [res.get("est_height_m", 0) * 100.0 for res in valid_final_results]
+                        heights_cm = []
+                        for res in valid_final_results:
+                            h = res.get("est_height_m")
+                            if h is not None:
+                                heights_cm.append(h * 100.0)
+                            else:
+                                logger.warning(f"Bỏ qua kết quả vì est_height_m bị None")
+
                         height_packet = {"table_id": self.table_id, "heights_cm": heights_cm}
                         asyncio.create_task(self.height_queue.put(height_packet))
                         
                         for result in valid_final_results:
                             result["camera_id"] = config.OPI_CONFIG.get("device_id", "opi_01")
                             await processing_queue.put(result)
+                            logger.info("Đã put data vào processing_queue")
                 
                 frame_number += len(frames_for_detection)
 
