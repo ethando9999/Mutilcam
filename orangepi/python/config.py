@@ -62,7 +62,7 @@ RPI_CONFIG = {
 
 FACE_CONFIG = {
     "face_detection_conf": 0.8,  
-    "race_conf": 0.8,
+    "race_conf": 0.7,
     "gender_conf": 0.9, 
     "age_conf": 0.8,
 }

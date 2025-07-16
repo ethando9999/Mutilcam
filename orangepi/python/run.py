@@ -58,7 +58,7 @@ async def main(args):
     elif not os.path.exists(db_path):
         await create_database(db_path=db_path)
 
-    frame_queue = asyncio.Queue(maxsize=1000)
+    frame_queue = asyncio.Queue(maxsize=5)
     processing_queue = asyncio.Queue(maxsize=200)
     people_count_queue = asyncio.Queue(maxsize=1)
     height_queue = asyncio.Queue(maxsize=1)

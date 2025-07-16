@@ -7,6 +7,7 @@ from datetime import datetime
 import numpy as np
 import time
 from typing import Optional
+from collections import Counter 
 
 # Giả định các module này tồn tại và hoạt động đúng
 from utils.logging_python_orangepi import get_logger
@@ -23,12 +24,13 @@ logger = get_logger(__name__)
 class FrameProcessor:
     """
     Xử lý các lô frame RGB-D, từ phát hiện người cho đến trích xuất thông tin chi tiết.
-    Tích hợp logic gửi dữ liệu qua WebSocket một cách thông minh.
+    Tích hợp logic gửi dữ liệu qua WebSocket một cách thông minh và làm mịn dữ liệu.
     """
-    def __init__(self, calib_path: str, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue, batch_size: int = 1):
+    def __init__(self, calib_path: str, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue, batch_size: int = 5):
         """
         Khởi tạo tất cả các module cần thiết và các biến trạng thái.
         """
+        # ... (các phần khởi tạo detector, pose_processor, stereo_projector, height_estimator không đổi)
         self.detector = HumanDetection()
         self.pose_processor = PoseColorSignatureExtractor()
         self.stereo_projector = StereoProjector(calib_file_path=calib_path)
@@ -47,15 +49,21 @@ class FrameProcessor:
         self.debug_dir = os.path.join(config.OPI_CONFIG.get("results_dir", "results"), "debug_projection")
         os.makedirs(self.debug_dir, exist_ok=True)
 
-        # --- Quản lý trạng thái "Không có người" ---
-        self.is_in_no_people_state = True
-        self.last_zero_sent_time = 0
-        self.PERIODIC_ZERO_INTERVAL = 10 # Giây
-        
+        # --- Quản lý bộ đệm đếm người (THAY THẾ CHO LOGIC CŨ) ---
+        self.temp_count_queue = asyncio.Queue()
+        self.count_buffer_size = 5 # Kích thước bộ đệm như yêu cầu
+
+        # Các biến cũ không còn cần thiết
+        # self.is_in_no_people_state = True
+        # self.last_zero_sent_time = 0
+        # self.PERIODIC_ZERO_INTERVAL = 10 
+
+        self.pass_count = -1
+        self.fps_avg = 0.0
+        self.call_count = 0    
         self.table_id = config.OPI_CONFIG.get("SOCKET_TABLE_ID", 1)
         
-        logger.info("FrameProcessor (Tối ưu & Tích hợp Websocket) đã được khởi tạo.")
-
+        logger.info("FrameProcessor (Tối ưu & Tích hợp Websocket với bộ đệm) đã được khởi tạo.")
     # --------------------------------------------------------------------
     # CÁC HÀM PHỤ TRỢ (HELPERS)
     # --------------------------------------------------------------------
@@ -164,27 +172,43 @@ class FrameProcessor:
             
     async def _manage_people_count_state(self, current_person_count: int):
         """
-        Quản lý trạng thái và quyết định khi nào gửi số lượng người (kể cả số 0).
+        Quản lý bộ đệm đếm người và chỉ gửi đi giá trị ổn định nhất.
+        1. Đưa số lượng người hiện tại vào một queue tạm.
+        2. Khi queue tạm đủ số lượng (ví dụ: 5), lấy tất cả ra.
+        3. Tìm giá trị xuất hiện nhiều nhất (mode) trong các giá trị đó.
+        4. Gửi giá trị ổn định này vào queue chính để gửi qua WebSocket.
         """
-        if current_person_count > 0:
-            packet = {"total_person": current_person_count}
-            asyncio.create_task(self.people_count_queue.put(packet))
-            self.is_in_no_people_state = False
-        else:
-            now = time.time()
-            force_send = False
-            if not self.is_in_no_people_state:
-                logger.info("Chuyển sang trạng thái không có người. Gửi số 0 ngay lập tức.")
-                self.is_in_no_people_state = True
-                force_send = True
+        # 1. Đưa số lượng người hiện tại vào queue tạm
+        await self.temp_count_queue.put(current_person_count)
 
-            time_since_last_send = now - self.last_zero_sent_time
-            if force_send or time_since_last_send > self.PERIODIC_ZERO_INTERVAL:
-                packet = {"total_person": 0}
-                asyncio.create_task(self.people_count_queue.put(packet))
-                self.last_zero_sent_time = now
-                if not force_send:
-                    logger.info(f"Đã {self.PERIODIC_ZERO_INTERVAL}s không thấy ai, gửi định kỳ số 0.")
+        # 2. Kiểm tra nếu queue tạm đã đủ lớn để xử lý
+        if self.temp_count_queue.qsize() >= self.count_buffer_size:
+            counts_in_buffer = []
+            # Lấy chính xác `count_buffer_size` phần tử từ queue
+            for _ in range(self.count_buffer_size):
+                try:
+                    # Lấy phần tử ra khỏi queue mà không cần chờ
+                    count = self.temp_count_queue.get_nowait()
+                    counts_in_buffer.append(count)
+                except asyncio.QueueEmpty:
+                    # Trường hợp hiếm gặp nếu queue bị rỗng giữa chừng
+                    break
+            
+            if not counts_in_buffer:
+                return # Không có gì để xử lý
+
+            # 3. Tìm giá trị xuất hiện nhiều nhất (mode)
+            # Counter(counts_in_buffer).most_common(1) trả về list dạng [(giá_trị, số_lần_xuất_hiện)]
+            # ví dụ: Counter([5, 5, 6, 5, 5]).most_common(1) -> [(5, 4)]
+            # Chúng ta chỉ cần lấy giá trị (phần tử đầu tiên của tuple đầu tiên)
+            stable_count = Counter(counts_in_buffer).most_common(1)[0][0]
+
+            logger.info(f"Đã xử lý bộ đệm đếm: {counts_in_buffer} -> Gửi đi số lượng ổn định: {stable_count}")
+
+            # 4. Gửi giá trị ổn định này vào queue chính
+            packet = {"total_person": stable_count}
+            asyncio.create_task(self.people_count_queue.put(packet))
+
 
     async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue):
         """
@@ -192,6 +216,7 @@ class FrameProcessor:
         """
         frame_number = 0
         while True:
+            start_time = time.time()
             # BƯỚC 1: LẤY VÀ ĐỌC DỮ LIỆU BATCH FRAME
             batch_data_paths = []
             try:
@@ -224,9 +249,9 @@ class FrameProcessor:
                 if not frames_for_detection: continue
 
                 # BƯỚC 2: PHÁT HIỆN NGƯỜI (SONG SONG)
-                detection_results = await asyncio.gather(*[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection], return_exceptions=True)
+                detection_results = await asyncio.gather(*[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection], return_exceptions=True) 
 
-                # BƯỚC 3: LỌC VÀ TÍNH KHOẢNG CÁCH (SONG SONG)
+                # BƯỚC 3: LỌC VÀ TÍNH KHOẢNG CÁCH (SONG SONG) 
                 potential_detections = []
                 for i, res in enumerate(detection_results):
                     if not res or isinstance(res, Exception): continue
@@ -276,7 +301,12 @@ class FrameProcessor:
                             logger.info("Đã put data vào processing_queue")
                 
                 frame_number += len(frames_for_detection)
-
+                end_time = time.time()
+                duration = end_time - start_time
+                fps_current = len(batch_data_paths) / duration if duration > 0 else 0
+                # Giả sử self.fps_avg, self.call_count đã khởi tạo trước đó
+                self.fps_avg = (self.fps_avg * self.call_count + fps_current) / (self.call_count + 1)
+                self.call_count += 1
             except Exception as e:
                 logger.error(f"Lỗi không mong muốn trong xử lý lô: {e}", exc_info=True)
 
@@ -293,7 +323,7 @@ async def start_processor(frame_queue: asyncio.Queue, processing_queue: asyncio.
             calib_path=calib_path,
             people_count_queue=people_count_queue,
             height_queue=height_queue,
-            batch_size=2 
+            batch_size=4 
         )
         await processor.process_frame_queue(frame_queue, processing_queue)
     except Exception as e:

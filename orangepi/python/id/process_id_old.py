@@ -29,9 +29,9 @@ class ManagerID:
 
     def __init__(self, id_queue: asyncio.Queue, output_dir: str, config: dict):
         self.id_queue = id_queue
-        self.output_dir = output_dir
-        self.config = config
-        self.device_id = self.config.get('device_id', str(uuid.uuid4()))
+        self.output_dir = output_dir 
+        self.config = OPI_CONFIG
+        self.device_id = OPI_CONFIG.get('device_id', str(uuid.uuid4()))
 
         # RabbitMQ setup
         self.rabbit = RabbitMQManager(device_id=self.device_id)
@@ -44,20 +44,20 @@ class ManagerID:
 
         # ReID manager
         self.reid_manager = ReIDManager(
-            db_path=self.config['db_path'],
-            feature_threshold=self.config['feature_threshold'],
-            color_threshold=self.config['color_threshold'],
-            avg_threshold=self.config['avg_threshold'],
-            top_k=self.config['top_k'],
-            thigh_weight=self.config['thigh_weight'],
-            torso_weight=self.config['torso_weight'],
-            feature_weight=self.config['feature_weight'],
-            color_weight=self.config['color_weight'],
+            db_path=config['db_path'],
+            feature_threshold=config['feature_threshold'],
+            color_threshold=config['color_threshold'],
+            avg_threshold=config['avg_threshold'],
+            top_k=config['top_k'],
+            thigh_weight=config['thigh_weight'],
+            torso_weight=config['torso_weight'],
+            feature_weight=config['feature_weight'],
+            color_weight=config['color_weight'],
         )
 
-        self.merge_threshold = self.config['merge_threshold']
-        self.temp_timeout = self.config['temp_timeout']
-        self.min_detections = self.config['min_detections']
+        self.merge_threshold = config['merge_threshold']
+        self.temp_timeout = config['temp_timeout']
+        self.min_detections = config['min_detections']
 
         # State
         self.remote_requested = set()
@@ -91,7 +91,10 @@ class ManagerID:
             return None
 
     async def _find_and_merge(self, temp_id: str) -> Optional[str]:
-        """Try to find a closest match and merge."""
+        """
+        Try to find a closest match and merge.
+        Return closest_id if merged, else None.
+        """
         try:
             closest_id, score = await self.reid_manager.find_closest_by_id(temp_id)
             if closest_id and score >= self.merge_threshold:
@@ -99,7 +102,7 @@ class ManagerID:
                 self._move_folder(temp_id, closest_id)
                 return closest_id
         except Exception:
-            logger.exception(f"Error merging temp {temp_id}")
+            logger.exception(f"Error in merging temp {temp_id}")
         return None
 
     def _move_folder(self, src_id: str, dst_id: str):
@@ -112,56 +115,37 @@ class ManagerID:
             shutil.rmtree(src, ignore_errors=True)
 
     async def handle_temp_update(self, person_id: str, normalized: dict, keypoints: Optional[dict]):
-        """Update or promote a temp ID based on detections and merge/remote logic."""
-        # 1) Count this detection
         self.temp_counts[person_id] += 1
 
-        # 2) Local merge if possible
+        # 1) Merge nếu có thể
         merged = await self._find_and_merge(person_id)
         if merged:
+            # nếu merge thành công thì không cần track temp_id nữa
             self.temp_id.discard(person_id)
             await self.reid_manager.update_person(merged, **normalized)
             return
 
-        # 3) Promote to official when reach threshold
-        if self.temp_counts[person_id] >= self.min_detections:
-            logger.info(f"[PROMOTE] Temp ID {person_id} is now official after {self.temp_counts[person_id]} detections")
-            # Cancel any pending timeout
-            task = self.timeout_tasks.pop(person_id, None)
-            if task:
-                task.cancel()
-            # Remove from temp tracking
-            self.temp_id.discard(person_id)
-            # Enqueue official ID for downstream processes
-            await self.maybe_put_id_to_queue({
-                **normalized,
-                'person_id': person_id,
-                'frame_id': normalized.get('frame_id'),
-                'time_detect': normalized.get('time_detect'),
-                'camera_id': self.config.get('camera_id'),
-                'head_point_3d': normalized.get('head_point_3d'),
-                'est_height_m': normalized.get('est_height_m')
-            })
-            return
-
-        # 4) Not merged or promoted: update temp in DB
+        # 2) Nếu chưa merge: cập nhật và đảm bảo đã add vào temp set
         await self.reid_manager.update_person(person_id, **normalized)
-        self.temp_id.add(person_id)
+        self.temp_id.add(person_id)  # <-- thêm vào đây
 
-        # 5) Decide remote request or schedule timeout
+        # 3) Quyết định gửi remote hay timeout
         if has_enough_valid_keypoints(keypoints):
             await self._publish_remote(person_id, **normalized)
         else:
             await self._schedule_timeout(person_id)
 
-    async def _publish_remote(self, temp_id: str, gender, race, age, body_color, feature, face_embedding):
-        """Send to remote ReID and process response."""
+    async def _publish_remote(self,
+                               temp_id: str,
+                               gender, race, age,
+                               body_color, feature, face_embedding):
+        """Send data to remote ReID and handle response."""
         try:
             await asyncio.wait_for(self.rabbit._ready.wait(), timeout=1)
             self.remote_requested.add(temp_id)
-            payload = dict(gender=gender, race=race, age=age,
-                           body_color=body_color, feature=feature,
-                           face_embedding=face_embedding)
+            payload = {"gender": gender, "race": race, "age": age,
+                       "body_color": body_color, "feature": feature,
+                       "face_embedding": face_embedding}
             fut = await self.rabbit.publish_remote_request(payload, request_id=str(temp_id))
 
             async def on_response():
@@ -169,7 +153,6 @@ class ManagerID:
                     matched = await asyncio.wait_for(fut, timeout=20)
                     if matched and matched != temp_id:
                         await self.reid_manager.replace_temp_person_id(temp_id, matched)
-                        self.temp_id.discard(temp_id)
                 except asyncio.TimeoutError:
                     logger.warning(f"Remote timeout for {temp_id}")
                 except Exception:
@@ -180,19 +163,23 @@ class ManagerID:
             logger.exception(f"Error publishing remote for {temp_id}")
 
     async def _schedule_timeout(self, temp_id: str):
-        """Schedule removal of low-count temps after timeout."""
         if temp_id in self.timeout_tasks:
             self.timeout_tasks[temp_id].cancel()
 
         async def watcher():
             try:
                 await asyncio.sleep(self.temp_timeout)
-                if temp_id not in self.remote_requested and self.temp_counts.get(temp_id, 0) < self.min_detections:
+                if (temp_id not in self.remote_requested
+                        and self.temp_counts[temp_id] < self.min_detections):
+                    # xóa hẳn
                     self.temp_id.discard(temp_id)
                     self.remote_requested.discard(temp_id)
                     self.temp_counts.pop(temp_id, None)
                     await self.reid_manager.remove_low_person_ids([temp_id])
-                    shutil.rmtree(os.path.join(self.output_dir, f"id_{temp_id}"), ignore_errors=True)
+                    shutil.rmtree(
+                        os.path.join(self.output_dir, f"id_{temp_id}"),
+                        ignore_errors=True
+                    )
             except asyncio.CancelledError:
                 pass
 
@@ -200,71 +187,105 @@ class ManagerID:
 
     @staticmethod
     def _safe(x):
-        return x if x is not None else "Unknown"
+        return x if x is not None else "Unknow"
 
     async def maybe_put_id_to_queue(self, person_meta: dict):
-        """Enqueue person_meta if valid."""
+        """
+        Bổ sung thông tin vào person_meta và đưa vào hàng đợi nếu có age, gender hoặc race.
+        """
         if not person_meta:
             return
+
+        # Bỏ qua nếu thiếu toàn bộ age, gender, race
         if not any(
             (v := person_meta.get(k)) is not None and not (isinstance(v, str) and v.lower() == "none")
             for k in ("age", "gender", "race")
         ):
-            logger.info("Skip enqueue: missing all age/gender/race")
+            logger.info("Bỏ qua, thiếu toàn bộ age, gender, race")
             return
 
+
+        # Lấy dữ liệu head_point_3d một cách an toàn
         hp3d = person_meta.get("head_point_3d")
-        point3D = list(hp3d) if hp3d is not None else [0, 0, 0]
+        if hp3d is None:
+            point3D = [0, 0, 0]
+        else:
+            # Nếu là numpy array hoặc list/tuple
+            point3D = list(hp3d)
 
         payload = {
-            "frame_id": person_meta.get("frame_id"),
-            "person_id": person_meta.get("person_id"),
-            "gender": self._safe(person_meta.get("gender")),
-            "race": self._safe(person_meta.get("race")),
-            "age": self._safe(person_meta.get("age")),
-            "height": float(person_meta.get("est_height_m") or 0.0),
+            "frame_id":    person_meta.get("frame_id"),
+            "person_id":   person_meta.get("person_id"),
+            "gender":      self._safe(person_meta.get("gender")),
+            "race":        self._safe(person_meta.get("race")),
+            "age":         self._safe(person_meta.get("age")),
+            "height":      float(person_meta.get("est_height_m") or 0.0),
             "time_detect": person_meta.get("time_detect"),
-            "camera_id": person_meta.get("camera_id"),
-            "point3D": point3D,
+            "camera_id":   person_meta.get("camera_id"),
+            "point3D":     point3D,
         }
-        logger.info("[SEND ID] Enqueue: %s", payload)
+        logger.info("[SEND ID] Đã put vào id_queue: %s", payload)
         await self.id_queue.put(payload)
 
+
     async def assign_id(self, **kwargs) -> str:
-        """Main entry: match or create ID."""
+        """Main entry: match existing or create new ID."""
         logger.debug(f"[assign_id] Keys: {list(kwargs.keys())}")
 
-        normalized = {k: kwargs.get(k) for k in (
-            "gender", "race", "age", "body_color", "feature_person",
-            "face_embedding", "est_height_m", "head_point_3d",
-            "bbox", "frame_id", "time_detect"
-        )}
-        normalized['feature'] = normalized.pop('feature_person')
-        normalized['bbox_data'] = normalized.pop('bbox')
+        normalized = {
+            "gender":          kwargs.get("gender"),
+            "race":            kwargs.get("race"),
+            "age":             kwargs.get("age"),
+            "body_color":      kwargs.get("body_color"),
+            "feature":         kwargs.get("feature_person"),
+            "face_embedding":  kwargs.get("face_embedding"),
+            "est_height_m":    kwargs.get("est_height_m"),
+            "head_point_3d":   kwargs.get("head_point_3d"),
+            "bbox_data":       kwargs.get("bbox"),
+            "frame_id":        kwargs.get("frame_id"),
+            "time_detect":     kwargs.get("time_detect"),
+        }
 
+        # drop time_detect for matching
         match_args = {k: v for k, v in normalized.items() if k != "time_detect"}
         matched = await self.reid_manager.match_id(**match_args)
         if matched:
+            logger.info(f"[assign_id] Existing ID: {matched}")
             if matched not in self.temp_id:
                 await self.handle_temp_update(matched, normalized, kwargs.get("keypoints"))
             else:
+                # 1) update DB
+                data = {
+                    "gender": normalized["gender"],
+                    "race": normalized["gender"],
+                    "age": normalized["age"],
+                }
+                logger.info(f"[UPDATE ID] data: {data}")
                 await self.reid_manager.update_person(matched, **normalized)
-                meta = await self.reid_manager.get_person_meta(matched)
-                if meta:
-                    enriched = {**meta,
-                                "frame_id": normalized["frame_id"],
-                                "time_detect": normalized["time_detect"],
-                                "camera_id": self.config.get("camera_id"),
-                                "est_height_m": normalized.get("est_height_m"),
-                                "head_point_3d": normalized.get("head_point_3d")}
+
+                # 2) fetch meta, enrich and enqueue
+                person_meta = await self.reid_manager.get_person_meta(matched)
+                if person_meta:
+                    # merge in extra fields without mutating original
+                    enriched = {
+                        **person_meta,
+                        "frame_id":      normalized["frame_id"],
+                        "time_detect":   normalized["time_detect"],
+                        "camera_id":     self.config.get("camera_id"),
+                        **{k: normalized[k] for k in ("est_height_m", "head_point_3d")}
+                    }
                     await self.maybe_put_id_to_queue(enriched)
+
             return matched
 
+        # No match → create new
+        logger.info("[assign_id] Creating new temp ID")
         temp_id = await self.reid_manager.create_person(**normalized)
         self.temp_id.add(temp_id)
+        logger.debug(f"New temp ID: {temp_id}")
         await self._schedule_timeout(temp_id)
         return temp_id
-
+    
     async def close(self):
         await self.rabbit.stop()
         await self.reid_manager.close()

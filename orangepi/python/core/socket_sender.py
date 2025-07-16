@@ -29,7 +29,25 @@ class Socket_Sender:
         self.server_uri = server_uri
         self.websocket = None
         self.lock = asyncio.Lock()
+        # Khởi tạo kết nối ngay khi tạo đối tượng
+        self._connect_task = asyncio.create_task(self._ensure_connection())
         logger.info(f"Socket_Sender khởi tạo cho URI: {self.server_uri}")
+
+    async def _ensure_connection(self):
+        """
+        Thử kết nối ban đầu và giữ lại kết nối.
+        """
+        while self.websocket is None:
+            try:
+                self.websocket = await asyncio.wait_for(
+                    websockets.connect(self.server_uri), timeout=5.0
+                )
+                logger.info(f">>> Kết nối WebSocket thành công tới {self.server_uri}! <<<")
+                return
+            except Exception as e:
+                logger.error(f"Kết nối tới {self.server_uri} thất bại: {e}. Thử lại sau 3 giây.")
+                self.websocket = None
+                await asyncio.sleep(3)
 
     async def send_packets(self, packets: dict):
         """
@@ -39,35 +57,30 @@ class Socket_Sender:
         message_to_send = json.dumps(packets, indent=2, default=_numpy_converter)
 
         async with self.lock:
-            while True:
-                # BƯỚC 1: Nếu chưa có kết nối, hãy tạo nó.
-                if self.websocket is None:
-                    try:
-                        self.websocket = await asyncio.wait_for(
-                            websockets.connect(self.server_uri), timeout=5.0
-                        )
-                        logger.info(f">>> Kết nối WebSocket thành công tới {self.server_uri}! <<<")
-                    except Exception as e:
-                        logger.error(f"Kết nối tới {self.server_uri} thất bại: {e}. Thử lại sau 3 giây.")
-                        self.websocket = None
-                        await asyncio.sleep(3)
-                        continue
+            # Đảm bảo kết nối ban đầu đã hoàn thành
+            if self._connect_task is not None:
+                await self._connect_task
+                self._connect_task = None
 
-                # BƯỚC 2: Nếu đã có kết nối, thử sử dụng nó.
+            while True:
+                if self.websocket is None:
+                    # Tái kết nối khi cần
+                    await self._ensure_connection()
+                    return
+
                 try:
+                    # Kiểm tra kết nối
                     await asyncio.wait_for(self.websocket.ping(), timeout=2.0)
                     await self.websocket.send(message_to_send)
                     logger.info(f"✅ Đã gửi tới {self.server_uri}:\n{message_to_send}")
-                    # Nếu cần nhận phản hồi, bỏ comment dòng dưới
-                    # response = await self.websocket.recv()
-                    return  # Thoát khỏi vòng lặp nếu gửi thành công
-
-                # BƯỚC 3: Nếu có lỗi, kết nối đã hỏng.
+                    return
                 except Exception as e:
-                    logger.warning(f"Kết nối tới {self.server_uri} có vấn đề ({type(e).__name__}). Đóng và tạo lại...")
+                    logger.warning(
+                        f"Kết nối tới {self.server_uri} có vấn đề ({type(e).__name__}). Đóng và tạo lại..."
+                    )
                     try:
                         await self.websocket.close()
-                    except:
+                    except Exception:
                         pass
                     self.websocket = None
 
