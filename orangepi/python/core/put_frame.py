@@ -42,12 +42,15 @@ class FramePutter:
         #     logger.info(f"Khởi tạo camera {idx} cho FramePutter")
 
     def _update_fps(self):
+        """Update FPS calculation.""" 
         self.frame_count += 1
         current_time = asyncio.get_event_loop().time()
-        elapsed = current_time - self.start_time
-        self.fps = self.frame_count / elapsed if elapsed > 0 else 0
-        self.fps_avg = (self.fps_avg * self.call_count + self.fps) / (self.call_count + 1)
-        self.call_count += 1
+        elapsed_time = current_time - self.start_time
+        if elapsed_time >= 1:
+            self.fps = self.frame_count / elapsed_time
+            logger.info(f"FPS putting: {self.fps:.2f}")
+            self.start_time = current_time
+            self.frame_count = 0
 
     async def put_frames_queue(self, frame_queue: asyncio.Queue):
         self.start_time = asyncio.get_event_loop().time()
@@ -103,7 +106,8 @@ class FramePutter:
         frame_queue: asyncio.Queue, 
         video_path="/home/ubuntu/orangepi/python/data/output_4k_video.mp4"
     ):
-        """Read frames from a video file, save to SD card and put file path into queue."""
+        """Read frames from a video file, save to SD card and put file path into queue,
+        sampling one frame and skipping three."""
         cap = cv2.VideoCapture(video_path)
         frame_index = 0
         self.start_time = asyncio.get_event_loop().time()
@@ -115,36 +119,40 @@ class FramePutter:
                     logger.info(f"End of video or invalid frame at index {frame_index}")
                     break
 
-                # Lưu khung hình vào thẻ SD
-                frame_path = os.path.join(self.frame_dir, f"frame_video_{frame_index}.jpg")
-                cv2.imwrite(
-                    frame_path,
-                    frame,
-                    [cv2.IMWRITE_JPEG_QUALITY, 100]  # Chất lượng JPEG
-                )
-
-                # Đưa đường dẫn file vào hàng đợi
-                try:
-                    await asyncio.wait_for(
-                        frame_queue.put((frame_index, frame_path)), 
-                        timeout=15.0
+                # Only process every 4th frame
+                if frame_index % 4 == 0:
+                    # Lưu khung hình vào thẻ SD
+                    frame_path = os.path.join(self.frame_dir, f"frame_video_{frame_index}.jpg")
+                    cv2.imwrite(
+                        frame_path,
+                        frame,
+                        [cv2.IMWRITE_JPEG_QUALITY, 100]  # Chất lượng JPEG
                     )
-                    logger.debug(f"Put video frame {frame_index} to queue: {frame_path}")
-                    self._update_fps()
-                    frame_index += 1
-                except asyncio.TimeoutError:
-                    logger.warning(f"Timeout putting frame {frame_index} into queue")
-                    continue
 
-                # Nghỉ nhẹ để không chặn event loop
+                    # Đưa đường dẫn file vào hàng đợi
+                    try:
+                        await asyncio.wait_for(
+                            frame_queue.put((frame_index, frame_path)), 
+                            timeout=15.0
+                        )
+                        logger.debug(f"Put video frame {frame_index} to queue: {frame_path}")
+                        self._update_fps()
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout putting frame {frame_index} into queue")
+                        # Continue even on timeout
+
+                # Advance the frame counter and lightly yield control
+                frame_index += 1
                 await asyncio.sleep(0.001)
 
         except Exception as e:
             logger.error(f"Error reading video: {e}", exc_info=True)
         finally:
             cap.release()
-            await frame_queue.put(None)  # tín hiệu kết thúc
+            # Signal end of stream
+            await frame_queue.put(None)
             logger.info("Video capture released")
+
 
     def stop(self):
         self.stop_event.set()

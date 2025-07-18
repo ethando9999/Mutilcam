@@ -22,47 +22,18 @@ class ReIDManager:
         self,
         db_path='database.db',
         feature_threshold=0.75,
-        color_threshold=0.6,
-        avg_threshold=0.8,
-        top_k=3,
-        global_color_mean=None,
-        thigh_weight: float = 4,
-        torso_weight: float = 4,
-        feature_weight: float = 0.5,
-        color_weight: float = 0.5,
-        δ0_feat=0.25,
-        δ_margin=0.05,
         face_threshold=0.8,
+        hard_feature_threshold: float = 0.5,
+        hard_face_threshold: float = 0.5,
+        top_k=3,
     ):
         self.db_path = db_path
         self.feature_threshold = feature_threshold
-        self.color_threshold = color_threshold
-        self.avg_threshold = avg_threshold
         self.top_k = top_k
         self.face_threshold = face_threshold
 
-        # Global color stats
-        self.sum_color = np.zeros(51, dtype=np.float64)
-        self.count_color = np.zeros(51, dtype=np.int64)
-        if global_color_mean is not None:
-            init = np.array(global_color_mean, dtype=np.float32)
-            valid = ~np.isnan(init)
-            self.sum_color[valid] = init[valid]
-            self.count_color[valid] = 1
-        self.global_color_mean = np.divide(
-            self.sum_color,
-            np.where(self.count_color > 0, self.count_color, 1),
-            out=np.zeros_like(self.sum_color, dtype=np.float32),
-            where=self.count_color > 0
-        ).astype(np.float32)
-
-        # Weights for color regions
-        self.thigh_weight = thigh_weight
-        self.torso_weight = torso_weight
-
         # History
         self.feature_history = defaultdict(lambda: deque(maxlen=20))
-        self.color_history = defaultdict(lambda: deque(maxlen=20))
         self.face_embedding_history = defaultdict(lambda: deque(maxlen=20))
 
         # Async DB setup
@@ -77,10 +48,10 @@ class ReIDManager:
         asyncio.create_task(self._init_database())
 
         self.tracking_manager = TrackingManager()
-        self.hard_face_threshold = 0.8
-        self.hard_feature_threshold = 0.7
+        self.hard_face_threshold = hard_face_threshold
+        self.hard_feature_threshold = hard_feature_threshold
 
-        logger.info("ReIDManager init successful")
+        logger.info(f"ReIDManager init successful with feature_threshold: {feature_threshold}, face_threshold: {face_threshold}, hard_feature_threshold: {hard_feature_threshold}, hard_face_threshold: {hard_face_threshold}")
 
     async def _init_database(self):
         async with self.db_lock:
@@ -266,7 +237,6 @@ class ReIDManager:
             logger.exception(f"[DB] Failed to update_person: {e}")
             return None
 
-        
     async def match_id(
         self, 
         gender=None, race=None, age=None,
@@ -278,6 +248,14 @@ class ReIDManager:
         Tìm ID khớp nhất cho một phát hiện mới.
         """
         await self._ensure_db_ready()
+        # --- DEBUG: Log incoming metadata types/values ---
+        logger.debug(
+            "[MATCH_ID INPUT] age=%r (type=%s), gender=%r (type=%s), race=%r (type=%s)",
+            age, type(age).__name__,
+            gender, type(gender).__name__,
+            race, type(race).__name__
+        )
+
         try:
             start = time.time()
 
@@ -288,33 +266,47 @@ class ReIDManager:
             nf = self.normalize(np.asarray(feature, dtype=np.float32)) if feature is not None else None
             nface = self.normalize(np.asarray(face_embedding, dtype=np.float32)) if face_embedding is not None else None
             
+            # --- Kalman filter matching ---
+            if bbox_data is not None and frame_id is not None:
+                matched_pid = self.tracking_manager.match(bbox_data, frame_id, nf)
+                if matched_pid is not None:
+                    logger.info(f"[KALMAN FILTER] MATCH ID with kalman filter: {matched_pid}")
+                    return matched_pid
+                else:
+                    logger.info("NO-MATCH_ID with kalman filter")   
+
             _ = body_color
             _ = est_height_m
 
             async with self.db_lock:
-                sql_parts = ["1=1"]
-                params = []
+                # --- DEBUG: Normalized params for SQL ---
+                logger.debug(
+                    "[SQL FILTER PARAMS] age_filter=%r, gender_filter=%r, race_filter=%r",
+                    age, gender, race
+                )
 
-                if age is not None: 
-                    sql_parts.append("(age = ? OR age IS NULL)")
-                    params.append(str(age))
-                if gender is not None: 
-                    sql_parts.append("(gender = ? OR gender IS NULL)")
-                    params.append(str(gender))
-                if race is not None: 
-                    sql_parts.append("(race = ? OR race IS NULL)")
-                    params.append(str(race))
-
-                query = f"SELECT person_id FROM PersonsMeta WHERE {' AND '.join(sql_parts)}"
+                query = """
+                    SELECT person_id FROM PersonsMeta
+                    WHERE ((? IS NULL) OR (age = ? OR age IS NULL))
+                    AND ((? IS NULL) OR (gender = ? OR gender IS NULL))
+                    AND ((? IS NULL) OR (race = ? OR race IS NULL))
+                """
+                params = [
+                    age, age,
+                    gender, gender,
+                    race, race
+                ]
                 cur = await self.db.execute(query, params)
                 candidates = [row[0] for row in await cur.fetchall()]
+
+                logger.debug("[SQL RESULT] candidates=%s", candidates)
 
                 if not candidates:
                     logger.info("No candidates after metadata filtering.")
                     return None
 
             # --- Face matching ---
-            if nface is not None and candidates:
+            if nface is not None and candidates: 
                 placeholders = ",".join("?" for _ in candidates)
                 k_face = min(self.top_k, len(candidates), 5)
                 sql_face = (
@@ -344,15 +336,8 @@ class ReIDManager:
                             if sim_bank >= self.hard_face_threshold:
                                 logger.info(f"[FACEID] match passed for {best_face_pid} (sim={sim_bank:.4f}) in {time.time()-start:.2f}s")
                                 return best_face_pid
+                        logger.warning("[FACE ID] Đã có {best_face_sim} nhưng không khớp tất cả")
 
-            # --- Kalman filter matching ---
-            if bbox_data is not None and frame_id is not None:
-                matched_pid = self.tracking_manager.match(bbox_data, frame_id, nf)
-                if matched_pid is not None:
-                    logger.info(f"[KALAM FILTER] MATCH ID with kalman filter: {matched_pid}")
-                    return matched_pid
-                else:
-                    logger.info("NO-MATCH_ID with kalman filter")
 
             # --- Feature vector matching ---
             if nf is not None and candidates:
@@ -385,12 +370,137 @@ class ReIDManager:
                             if sim_bank >= self.hard_feature_threshold:
                                 logger.info(f"[FEATURE] Hard-feature check passed for {best_pid} (sim={sim_bank:.4f})")
                                 return best_pid 
-
+            logger.info("[MATCH ID] không khớp tất cả")
             return None 
 
         except Exception as e:
             logger.exception(f"[DB] Failed to match_id: {e}")
             return None
+
+        
+    # async def match_id(
+    #     self, 
+    #     gender=None, race=None, age=None,
+    #     body_color=None, feature=None, face_embedding=None,
+    #     est_height_m=None, head_point_3d=None,
+    #     bbox_data=None, frame_id=None
+    # ):
+    #     """
+    #     Tìm ID khớp nhất cho một phát hiện mới.
+    #     """
+    #     await self._ensure_db_ready()
+    #     try:
+    #         start = time.time()
+
+    #         if feature is None and face_embedding is None:
+    #             logger.warning("No feature or face embedding given for matching.")
+    #             return None
+
+    #         nf = self.normalize(np.asarray(feature, dtype=np.float32)) if feature is not None else None
+    #         nface = self.normalize(np.asarray(face_embedding, dtype=np.float32)) if face_embedding is not None else None
+            
+    #         # --- Kalman filter matching ---
+    #         if bbox_data is not None and frame_id is not None:
+    #             matched_pid = self.tracking_manager.match(bbox_data, frame_id, nf)
+    #             if matched_pid is not None:
+    #                 logger.info(f"[KALAM FILTER] MATCH ID with kalman filter: {matched_pid}")
+    #                 return matched_pid
+    #             else:
+    #                 logger.info("NO-MATCH_ID with kalman filter")   
+
+    #         _ = body_color
+    #         _ = est_height_m
+
+    #         async with self.db_lock:
+    #             query = """
+    #                 SELECT person_id FROM PersonsMeta
+    #                 WHERE ((? IS NULL) OR (age = ? OR age IS NULL))
+    #                 AND ((? IS NULL) OR (gender = ? OR gender IS NULL))
+    #                 AND ((? IS NULL) OR (race = ? OR race IS NULL))
+    #             """
+    #             params = [
+    #                 age, age,
+    #                 gender, gender,
+    #                 race, race
+    #             ]
+    #             cur = await self.db.execute(query, params)
+    #             candidates = [row[0] for row in await cur.fetchall()]
+
+    #             if not candidates:
+    #                 logger.info("No candidates after metadata filtering.")
+    #                 return None
+
+    #         # --- Face matching ---
+    #         if nface is not None and candidates: 
+    #             placeholders = ",".join("?" for _ in candidates)
+    #             k_face = min(self.top_k, len(candidates), 5)
+    #             sql_face = (
+    #                 f"SELECT person_id, face_embedding FROM FaceVector"
+    #                 f" WHERE person_id IN ({placeholders})"
+    #                 f" AND face_embedding MATCH ? AND k = ?"
+    #             )
+    #             async with self.db.execute(sql_face, candidates + [nface.tobytes(), k_face]) as cur:
+    #                 face_rows = await cur.fetchall()
+
+    #             if face_rows:
+    #                 ids, vecs = zip(*[(pid, np.frombuffer(buf, dtype=np.float32)) for pid, buf in face_rows])
+    #                 sims = cosine_similarity(np.stack(vecs), nface.reshape(1, -1)).ravel()
+    #                 best_idx = int(np.argmax(sims))
+    #                 best_face_pid, best_face_sim = ids[best_idx], float(sims[best_idx])
+
+    #                 if best_face_sim >= self.face_threshold:
+    #                     async with self.db.execute(
+    #                         "SELECT face_vec FROM FaceIDBankVec WHERE person_id = ? AND face_vec MATCH ? AND k = 1",
+    #                         (best_face_pid, nface.tobytes())
+    #                     ) as bank_cur:
+    #                         row = await bank_cur.fetchone()
+
+    #                     if row:
+    #                         bank_vec = np.frombuffer(row[0], dtype=np.float32)
+    #                         sim_bank = cosine_similarity(bank_vec.reshape(1, -1), nface.reshape(1, -1)).ravel()[0]
+    #                         if sim_bank >= self.hard_face_threshold:
+    #                             logger.info(f"[FACEID] match passed for {best_face_pid} (sim={sim_bank:.4f}) in {time.time()-start:.2f}s")
+    #                             return best_face_pid
+
+    #         # --- Feature vector matching ---
+    #         if nf is not None and candidates:
+    #             placeholders = ",".join("?" for _ in candidates)
+    #             k_feat = min(self.top_k, len(candidates), 5)
+    #             sql_feat = (
+    #                 f"SELECT person_id, feature_mean FROM PersonsVec"
+    #                 f" WHERE person_id IN ({placeholders})"
+    #                 f" AND feature_mean MATCH ? AND k = ?" 
+    #             )
+    #             async with self.db.execute(sql_feat, candidates + [nf.tobytes(), k_feat]) as cur:
+    #                 feat_rows = await cur.fetchall()
+
+    #             if feat_rows:
+    #                 ids, vecs = zip(*[(pid, np.frombuffer(buf, dtype=np.float32)) for pid, buf in feat_rows])
+    #                 sims = cosine_similarity(np.stack(vecs), nf.reshape(1, -1)).ravel()
+    #                 best_idx = int(np.argmax(sims))
+    #                 best_pid, best_sim = ids[best_idx], float(sims[best_idx])
+
+    #                 if best_sim >= self.feature_threshold:
+    #                     async with self.db.execute(
+    #                         "SELECT feature_vec FROM FeatureBankVec WHERE person_id = ? AND feature_vec MATCH ? AND k = 1",
+    #                         (best_pid, nf.tobytes())
+    #                     ) as feat_cur:
+    #                         row = await feat_cur.fetchone()
+
+    #                     if row:
+    #                         bank_vec = np.frombuffer(row[0], dtype=np.float32)
+    #                         sim_bank = cosine_similarity(bank_vec.reshape(1, -1), nf.reshape(1, -1)).ravel()[0]
+    #                         if sim_bank >= self.hard_feature_threshold:
+    #                             logger.info(f"[FEATURE] Hard-feature check passed for {best_pid} (sim={sim_bank:.4f})")
+    #                             return best_pid 
+    #         logger.info("[MATCH ID] không khớp tất cả")
+    #         return None 
+
+    #     except Exception as e:
+    #         logger.exception(f"[DB] Failed to match_id: {e}")
+    #         return None
+
+
 
 ##########################################################################################
 
@@ -413,7 +523,6 @@ class ReIDManager:
                 # Cleanup in-memory histories
                 for pid in ids_to_remove:
                     self.feature_history.pop(pid, None)
-                    self.color_history.pop(pid, None)
                     if pid in self.tracking_manager.tracks:
                         del self.tracking_manager.tracks[pid]
                 
@@ -488,8 +597,6 @@ class ReIDManager:
         # 6) Gộp lịch sử RAM
         if temp_id in self.feature_history:
             self.feature_history[match_id].extend(self.feature_history.pop(temp_id))
-        if temp_id in self.color_history:
-            self.color_history[match_id].extend(self.color_history.pop(temp_id))
 
         logger.info("[DB] Replace temp_id=%s → match_id=%s : DONE", temp_id, match_id)
         return True
@@ -576,9 +683,6 @@ class ReIDManager:
         if temp_id in self.feature_history:
             self.feature_history.setdefault(closest_id, [])
             self.feature_history[closest_id].extend(self.feature_history.pop(temp_id)) 
-        if temp_id in self.color_history:
-            self.color_history.setdefault(closest_id, [])
-            self.color_history[closest_id].extend(self.color_history.pop(temp_id))
 
         return True
 

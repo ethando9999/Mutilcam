@@ -27,7 +27,7 @@ OPI_CONFIG = {
     # --- Cấu hình Producer ---
     "slave_ip": "192.168.100.2", 
     "tcp_port": 5005,
-    "rgb_camera_id": 0,
+    "rgb_camera_id": 0, 
     "rgb_device_path": "/dev/rgb_cam",
     "rgb_resolution": (640, 480),
     "rgb_framerate": 15,
@@ -45,10 +45,9 @@ OPI_CONFIG = {
 
     # --- Cấu hình Re-ID ---
     "output_dir": DEFAULT_OUTPUT_DIR,
-    "feature_threshold": 0.65, "color_threshold": 0.7, "avg_threshold": 0.7,
-    "top_k": 3, "thigh_weight": 8, "torso_weight": 8, "feature_weight": 0.75,  
-    "color_weight": 0.25, "temp_timeout": 20, "min_detections": 3,
-    "merge_threshold": 0.75, "face_threshold": 0.75,
+    "feature_threshold": 0.5, "color_threshold": 0.7, "face_threshold": 0.5,
+    "hard_feature_threshold": 0.62, "hard_face_threshold": 0.7, "top_k": 3,  
+    "merge_threshold": 0.75, "temp_timeout": 20, "min_detections": 3,
 }
 
 

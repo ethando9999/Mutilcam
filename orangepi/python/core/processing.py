@@ -7,10 +7,11 @@ import random
 from typing import Dict, Any, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 import time
-from utils.yolo_pose_rknn import HumanDetection
+from utils.yolo_pose import HumanDetection
 from utils.pose_color_signature_new import PoseColorSignatureExtractor
 from utils.cut_body_part import extract_body_parts_from_frame
 import os 
+from datetime import datetime
 
 logger = get_logger(__name__)
 
@@ -60,13 +61,16 @@ class FrameProcessor:
                     "body_color": None,
                     "bbox": box,
                     "map_keypoints": map_keypoints,
+                    "head_point_3d": None, 
+                    "distance_mm": None, 
+                    "time_detect": datetime.now().isoformat()
                 }
             except Exception as e:
                 logger.error(f"Lỗi xử lý người cho frame {frame_id}: {e}", exc_info=True)
                 return None
 
     async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue):
-        """Xử lý khung hình từ hàng đợi theo lô, không dừng vĩnh viễn khi gặp None."""
+        """Xử lý khung hình từ hàng đợi theo lô, không dừng vĩnh viễn khi gặp None.""" 
         frame_number = 0
 
         while True:
@@ -80,7 +84,7 @@ class FrameProcessor:
                 item = await frame_queue.get()
             except asyncio.CancelledError:
                 logger.info("process_frame_queue bị hủy từ bên ngoài.")
-                break
+                break 
             try:
                 # Xử lý item đầu tiên
                 if item is None:
