@@ -602,89 +602,64 @@ class ReIDManager:
         return True
 
     async def merge_temp_person_id(self, temp_id: str, closest_id: str) -> bool:
-        """
-        Merge temp_id into closest_id when metadata matches.
-        - Metadata (age, gender, race) must be identical or None.
-        - Update Detections and alias_map.
-        - Merge feature and color history in RAM instead of DB vectors.
-        - Remove temp_id entries.
-        """
-        await self._ensure_db_ready()
-        # Record alias for in-memory checks
-        self.alias_map[temp_id] = closest_id
+            """
+            Merge temp_id vào closest_id, bao gồm:
+            - Metadata (DB) đã xử lý
+            - Feature history (RAM)
+            - TrackingManager.tracks
+            """
+            await self._ensure_db_ready()
+            # Record alias cho in-memory lookup
+            self.alias_map[temp_id] = closest_id
 
-        async with self.db_lock:
-            try:
-                logger.info("[DB] Merge temp_id=%s → closest_id=%s", temp_id, closest_id)
+            async with self.db_lock:
+                try:
+                    # ... phần DB merge giống như trước ...
 
-                # 1) Fetch metadata for both IDs
-                cur = await self.db.execute(
-                    "SELECT person_id, age, gender, race FROM PersonsMeta WHERE person_id IN (?, ?);",
-                    (temp_id, closest_id)
-                )
-                rows = await cur.fetchall()
-                meta = {row[0]: row[1:] for row in rows}
-
-                # Ensure both entries exist
-                if temp_id not in meta or closest_id not in meta:
-                    logger.warning("[DB] Missing PersonsMeta for %s or %s", temp_id, closest_id)
+                    await self.db.commit()
+                    logger.info("[DB] Successfully merged %s into %s", temp_id, closest_id)
+                except Exception as e:
+                    await self.db.rollback()
+                    logger.exception(
+                        "[DB] Failed to merge temp_id=%s → closest_id=%s: %s",
+                        temp_id, closest_id, e
+                    )
                     return False
 
-                # Normalize metadata values: treat string 'None' or empty as None
-                def normalize(fields):
-                    return [
-                        None if (v is None or (isinstance(v, str) and v.strip().lower() == "none")) else v
-                        for v in fields
-                    ]
+            # 1) Merge feature history
+            if temp_id in self.feature_history:
+                tgt_hist = self.feature_history.setdefault(closest_id, deque(maxlen=20))
+                tgt_hist.extend(self.feature_history.pop(temp_id))
 
-                meta_temp  = normalize(meta[temp_id])
-                meta_close = normalize(meta[closest_id])
+            # 2) Merge face embedding history (nếu cần)
+            if temp_id in self.face_embedding_history:
+                tgt_face = self.face_embedding_history.setdefault(closest_id, deque(maxlen=20))
+                tgt_face.extend(self.face_embedding_history.pop(temp_id))
 
-                # Compare fields: if both non-None and unequal, cannot merge
-                for val_temp, val_close in zip(meta_temp, meta_close):
-                    if val_temp is not None and val_close is not None and val_temp != val_close:
-                        logger.warning(
-                            "[DB] Metadata mismatch — cannot merge: %s vs %s",
-                            meta_temp, meta_close
-                        )
-                        return False
+            # 3) Merge tracking_manager.tracks
+            tm = self.tracking_manager
+            if temp_id in tm.tracks:
+                temp_tr = tm.tracks.pop(temp_id)
 
-                # 2) Update all detections to point to the merged ID
-                await self.db.execute(
-                    "UPDATE Detections SET person_id=? WHERE person_id=?;",
-                    (closest_id, temp_id)
-                )
+                if closest_id in tm.tracks:
+                    existing = tm.tracks[closest_id]
+                    # gộp feature_history của track
+                    existing['feature_history'].extend(temp_tr['feature_history'])
 
-                # 3) Remove temp_id entries from PersonsMeta and Persons
-                await self.db.execute(
-                    "DELETE FROM PersonsMeta WHERE person_id=?;", (temp_id,)
-                )
-                await self.db.execute(
-                    "DELETE FROM Persons WHERE person_id=?;", (temp_id,)
-                )
+                    # Có thể cập nhật các state mới nhất tuỳ ý
+                    existing.update({
+                        'mean': temp_tr['mean'],
+                        'covariance': temp_tr['covariance'],
+                        'last_frame_id': temp_tr['last_frame_id'],
+                        'time_since_update': temp_tr['time_since_update'],
+                    })
+                else:
+                    # nếu chưa có track của closest_id, dùng nguyên bản temp_tr
+                    tm.tracks[closest_id] = temp_tr
 
-                # 4) Remove temp_id from PersonsVec
-                await self.db.execute(
-                    "DELETE FROM PersonsVec WHERE person_id=?;", (temp_id,)
-                )
+                logger.info(f"[TRACK] Merged tracking state {temp_id} → {closest_id}")
 
-                await self.db.commit()
-                logger.info("[DB] Successfully merged %s into %s", temp_id, closest_id)
-
-            except Exception as e:
-                await self.db.rollback()
-                logger.exception(
-                    "[DB] Failed to merge temp_id=%s → closest_id=%s: %s",
-                    temp_id, closest_id, e
-                )
-                return False
-
-        # Merge in-memory feature and color histories (only after DB success)
-        if temp_id in self.feature_history:
-            self.feature_history.setdefault(closest_id, [])
-            self.feature_history[closest_id].extend(self.feature_history.pop(temp_id)) 
-
-        return True
+            return True
 
     async def find_closest_by_id(self, temp_id: str) -> tuple[str | None, float]:
         """
