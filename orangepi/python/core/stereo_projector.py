@@ -5,6 +5,7 @@ import cv2
 import os
 import logging
 import math
+from typing import Optional
 # Thiết lập logging
 try:
     from utils.logging_python_orangepi import get_logger
@@ -174,10 +175,10 @@ class StereoProjector:
     # ==============================================================================
 
     def get_worldpoint_coordinates(self,
-                              torso_box: tuple,
-                              feet_point_2d: tuple,
-                              depth_map: np.ndarray,
-                              cam_angle_deg: float) -> tuple[float, float] | None:
+                            torso_box: tuple,
+                            feet_point_2d: Optional[tuple],
+                            depth_map: np.ndarray,
+                            cam_angle_deg: float) -> Optional[dict]:
         """
         Phương thức cấp cao để lấy tọa độ thế giới (sàn nhà) của một người.
         Nó kết hợp cách tiếp cận tốt nhất: lấy khoảng cách ổn định từ torso
@@ -190,15 +191,25 @@ class StereoProjector:
             cam_angle_deg (float): Góc nghiêng của camera so với phương ngang (độ).
 
         Returns:
-            tuple[float, float] | None: Tọa độ (X, Y) trên sàn (cm), hoặc None nếu lỗi.
+            dict | None: Một dictionary chứa tọa độ sàn, khoảng cách và trạng thái,
+                        hoặc None nếu có lỗi.
         """
         # --- BƯỚC 1: Lấy khoảng cách ổn định từ torso box ---
         distance_mm, status = self.get_robust_distance(torso_box, depth_map)
-        if distance_mm is None:
-            logger.warning(f"Không thể lấy tọa độ thế giới vì: {status}")
+        if distance_mm is None or status != "OK":
+            logger.warning(f"Không thể lấy tọa độ thế giới vì không có khoảng cách hợp lệ: {status}")
             return None
 
         # --- BƯỚC 2: Chiếu tọa độ sàn từ điểm chân, sử dụng khoảng cách đã có ---
+        if feet_point_2d is None:
+            logger.warning("Không thể lấy tọa độ thế giới vì không tìm thấy điểm chân (feet_point_2d is None).")
+            # Trả về khoảng cách nhưng không có tọa độ sàn
+            return {
+                "floor_pos_cm": None,
+                "distance_mm": distance_mm,
+                "status": "Warning: No feet detected"
+            }
+
         u_feet, v_feet = feet_point_2d
 
         # Chiếu ngược điểm 2D ra không gian 3D của camera

@@ -132,7 +132,7 @@ class ManagerID:
                     'time_detect': normalized.get('time_detect'),
                     'camera_id': self.config.get('camera_id'),
                     'est_height_m': normalized.get('est_height_m'),
-                    'head_point_3d': normalized.get('head_point_3d')
+                    'world_point_xyz': normalized.get('world_point_xyz')
                 }
                 await self.maybe_put_id_to_queue(enriched)
             return
@@ -155,7 +155,7 @@ class ManagerID:
                 'time_detect': normalized.get('time_detect'),
                 'camera_id': self.config.get('camera_id'),
                 'est_height_m': normalized.get('est_height_m'),
-                'head_point_3d': normalized.get('head_point_3d')
+                'world_point_xyz': normalized.get('world_point_xyz')
             })
             return
 
@@ -206,7 +206,7 @@ class ManagerID:
                                 'time_detect': None,
                                 'camera_id': self.config.get('camera_id'),
                                 'est_height_m': None,
-                                'head_point_3d': None
+                                'world_point_xyz': None
                             }
                             await self.maybe_put_id_to_queue(enriched)
                 except asyncio.TimeoutError:
@@ -274,7 +274,7 @@ class ManagerID:
             logger.info("Skip enqueue: missing all age/gender/race")
             return
 
-        hp3d = person_meta.get("head_point_3d")
+        hp3d = person_meta.get("world_point_xyz")
         point3D = list(hp3d) if hp3d is not None else [0, 0, 0]
 
         payload = {
@@ -288,7 +288,7 @@ class ManagerID:
             "camera_id": person_meta.get("camera_id"),
             "point3D": point3D,
         }
-        logger.info("[SEND ID] Enqueue: %s", payload)
+        logger.info("[SEND ID] Enqueue: %s", payload) 
         await self.id_queue.put(payload)
 
     async def assign_id(self, **kwargs) -> str:
@@ -297,7 +297,7 @@ class ManagerID:
 
         normalized = {k: kwargs.get(k) for k in (
             "gender", "race", "age", "body_color", "feature_person",
-            "face_embedding", "est_height_m", "head_point_3d",
+            "face_embedding", "est_height_m", "world_point_xyz",
             "bbox", "frame_id", "time_detect"
         )}
         normalized['feature'] = normalized.pop('feature_person')
@@ -317,7 +317,7 @@ class ManagerID:
                                 "time_detect": normalized["time_detect"],
                                 "camera_id": self.config.get("camera_id"),
                                 "est_height_m": normalized.get("est_height_m"),
-                                "head_point_3d": normalized.get("head_point_3d")}
+                                "world_point_xyz": normalized.get("world_point_xyz")}
                     await self.maybe_put_id_to_queue(enriched)
             return matched
 

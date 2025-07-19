@@ -26,7 +26,7 @@ class FrameProcessor:
     Xử lý các lô frame RGB-D, từ phát hiện người cho đến trích xuất thông tin chi tiết.
     Tích hợp logic gửi dữ liệu qua WebSocket một cách thông minh và làm mịn dữ liệu.
     """
-    def __init__(self, calib_path: str, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue, batch_size: int = 5):
+    def __init__(self, calib_path: str, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue, batch_size: int = 2):
         """
         Khởi tạo tất cả các module cần thiết và các biến trạng thái.
         """
@@ -106,28 +106,61 @@ class FrameProcessor:
             await self._run_in_executor(cv2.imwrite, os.path.join(self.debug_dir, f"{base_name}_full_tof_boxed.png"), tof_color_map)
         except Exception as e:
             logger.error(f"Lỗi khi lưu ảnh debug: {e}")
+            
+    def _get_feet_point(self, keypoints: np.ndarray) -> Optional[tuple[int, int]]:
+        """
+        Lấy điểm chân (điểm thấp nhất) từ các keypoints.
+        Ưu tiên các điểm mắt cá chân (ankle) có confidence cao.
+        YOLOv8-Pose keypoints: 15: left_ankle, 16: right_ankle.
+        """
+        if keypoints.shape[0] <= 16: return None # Đảm bảo có đủ keypoints
+        
+        ankle_kpts = keypoints[[15, 16], :]
+        
+        # Lọc các keypoint có confidence > 0.3 (một ngưỡng hợp lý)
+        if keypoints.shape[1] >= 3:
+            visible_ankles = ankle_kpts[ankle_kpts[:, 2] > 0.3]
+        else: # Dự phòng nếu không có confidence
+            visible_ankles = ankle_kpts[np.sum(ankle_kpts, axis=1) > 0]
+            
+        if len(visible_ankles) == 0:
+            return None
+        
+        # Tìm điểm chân thấp nhất trên ảnh (có tọa độ v lớn nhất)
+        lowest_foot = visible_ankles[np.argmax(visible_ankles[:, 1])]
+        
+        return int(lowest_foot[0]), int(lowest_foot[1])
 
     # --------------------------------------------------------------------
     # HÀM XỬ LÝ CHÍNH (CORE PROCESSING)
     # --------------------------------------------------------------------
 
-    async def process_human_async(self, frame_id: int, rgb_frame: np.ndarray, tof_depth_map: np.ndarray, box: tuple, keypoints: np.ndarray, precomputed_distance_mm: Optional[float] = None):
+    async def process_human_async(self, frame_id: int, rgb_frame: np.ndarray, tof_depth_map: np.ndarray, box: tuple, keypoints: np.ndarray):
         """
-        Luồng xử lý tối ưu cho một người. Tái sử dụng khoảng cách đã tính để tăng hiệu suất.
+        Luồng xử lý tối ưu cho một người. Gọi hàm cấp cao để lấy tọa độ và khoảng cách.
         """
         async with self.semaphore:
             try:
-                distance_mm = precomputed_distance_mm
-                if distance_mm is None: # Dự phòng nếu không có khoảng cách tính sẵn
-                    torso_box = get_torso_box(keypoints, box)
-                    distance_mm, status = await self._run_in_executor(self.stereo_projector.get_robust_distance, torso_box, tof_depth_map)
-                    if status != "OK" or not (100 < distance_mm < 4000):
-                        return None
+                # BƯỚC 1: LẤY TỌA ĐỘ SÀN VÀ KHOẢNG CÁCH CÙNG LÚC
+                torso_box = get_torso_box(keypoints, box)
+                feet_point = self._get_feet_point(keypoints)
+                cam_angle = config.OPI_CONFIG.get("CAM_ANGLE_DEG", 15.0)
+
+                world_data = await self._run_in_executor(
+                    self.stereo_projector.get_worldpoint_coordinates,
+                    torso_box, feet_point, tof_depth_map, cam_angle
+                )
+
+                if world_data is None:
+                    return None # Lỗi đã được log bên trong hàm
+                
+                distance_mm = world_data["distance_mm"]
+                world_point_xy = world_data["floor_pos_cm"]
                 
                 logger.info(f"✅ Người hợp lệ. Khoảng cách: {distance_mm/1000:.2f}m. Bắt đầu xử lý sâu...")
                 distance_m = distance_mm / 1000.0
 
-                # Chạy song song các tác vụ còn lại
+                # BƯỚC 2: CHẠY SONG SONG CÁC TÁC VỤ CÒN LẠI
                 height_task = self._run_in_executor(self.height_estimator.estimate, keypoints, distance_m)
                 
                 human_box_img = rgb_frame[box[1]:box[3], box[0]:box[2]]
@@ -144,22 +177,18 @@ class FrameProcessor:
                 if tof_box_projected:
                     debug_base_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S%f')}_F{frame_id}"
                     asyncio.create_task(self.save_debug_images(debug_base_name, rgb_frame.copy(), tof_depth_map.copy(), box, tof_box_projected))
-
-                head_kp = get_head_center(keypoints)
-                world_point_3d = None
-                if head_kp is not None:
-                    head_kp = np.array(head_kp, dtype=np.float32).reshape(1, 2)
-                    head_kp_3d = self.stereo_projector._back_project_rgb_to_3d(head_kp, distance_mm)
-                    world_point_3d = head_kp_3d[0]
+                
+                # Bỏ logic head_point_3d cũ
                 
                 logger.info(f"✅✅ Xử lý hoàn tất: Khoảng cách={distance_m:.2f}m, "
-                            f"Chiều cao={(f'{est_height_m:.2f}' if est_height_m is not None else 'None')}m ({height_status})")
+                            f"Chiều cao={(f'{est_height_m:.2f}m' if est_height_m is not None else 'None')} ({height_status}), "
+                            f"Vị trí sàn={('({:.1f}, {:.1f}) cm'.format(*world_point_xy)) if world_point_xy else 'Không có'}")
 
                 return {
                     "frame_id": frame_id, 
                     "human_box": human_box_img, 
                     "body_parts": body_parts_boxes,
-                    "head_point_3d": world_point_3d, 
+                    "world_point_xy": world_point_xy, # <--- KEY MỚI
                     "bbox": box, "map_keypoints": keypoints,
                     "distance_mm": distance_mm, 
                     "est_height_m": est_height_m, 
@@ -251,62 +280,52 @@ class FrameProcessor:
                 # BƯỚC 2: PHÁT HIỆN NGƯỜI (SONG SONG)
                 detection_results = await asyncio.gather(*[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection], return_exceptions=True) 
 
-                # BƯỚC 3: LỌC VÀ TÍNH KHOẢNG CÁCH (SONG SONG) 
-                potential_detections = []
+                # BƯỚC 3: TẠO TÁC VỤ XỬ LÝ SÂU CHO TẤT CẢ CÁC PHÁT HIỆN HỢP LỆ
+                all_human_tasks = []
                 for i, res in enumerate(detection_results):
                     if not res or isinstance(res, Exception): continue
                     kpts_data, boxes_data = res
                     rgb, depth = loaded_data_map[i]
                     for kpts, box in zip(kpts_data, boxes_data):
                         if self._is_detection_valid(box, kpts, rgb.shape):
-                            potential_detections.append({"idx": i, "rgb": rgb, "depth": depth, "box": box, "kpts": kpts})
+                            # Tạo task xử lý sâu, không cần tính khoảng cách trước
+                            task = self.process_human_async(
+                                frame_number + i, rgb, depth, box, kpts
+                            )
+                            all_human_tasks.append(task)
+                
+                # BƯỚC 4: THU THẬP KẾT QUẢ VÀ GỬI ĐI
+                if not all_human_tasks:
+                    await self._manage_people_count_state(0)
+                    continue
 
-                distance_tasks = [self._run_in_executor(self.stereo_projector.get_robust_distance, get_torso_box(d["kpts"], d["box"]), d["depth"]) for d in potential_detections]
-                distance_results = await asyncio.gather(*distance_tasks, return_exceptions=True)
+                final_results = await asyncio.gather(*all_human_tasks, return_exceptions=True)
+                valid_final_results = [res for res in final_results if res and not isinstance(res, Exception)]
+                
+                # Gửi số lượng người đếm được
+                await self._manage_people_count_state(len(valid_final_results))
 
-                # BƯỚC 4: TẠO TÁC VỤ XỬ LÝ SÂU
-                all_human_tasks = []
-                valid_counts_per_frame = [0] * len(frames_for_detection)
-                for i, det_info in enumerate(potential_detections):
-                    dist_res = distance_results[i]
-                    if isinstance(dist_res, Exception): continue
-                    dist_mm, status = dist_res
-                    if status == "OK" and dist_mm and (100 < dist_mm < 4000):
-                        valid_counts_per_frame[det_info["idx"]] += 1
-                        all_human_tasks.append(self.process_human_async(frame_number + det_info["idx"], det_info["rgb"], det_info["depth"], det_info["box"], det_info["kpts"], precomputed_distance_mm=dist_mm))
-
-                # BƯỚC 5: GỬI KẾT QUẢ TỔNG HỢP VÀ CHI TIẾT
-                max_person_count = max(valid_counts_per_frame) if valid_counts_per_frame else 0
-                await self._manage_people_count_state(max_person_count)
-
-                if all_human_tasks:
-                    final_results = await asyncio.gather(*all_human_tasks, return_exceptions=True)
-                    valid_final_results = [res for res in final_results if res and not isinstance(res, Exception)]
-                    
-                    if valid_final_results:
-                        heights_cm = []
-                        for res in valid_final_results:
-                            h = res.get("est_height_m")
-                            if h is not None:
-                                heights_cm.append(h * 100.0)
-                            else:
-                                logger.warning(f"Bỏ qua kết quả vì est_height_m bị None")
-
+                if valid_final_results:
+                    # Gửi thông tin chiều cao
+                    heights_cm = [res["est_height_m"] * 100.0 for res in valid_final_results if res.get("est_height_m") is not None]
+                    if heights_cm:
                         height_packet = {"table_id": self.table_id, "heights_cm": heights_cm}
                         asyncio.create_task(self.height_queue.put(height_packet))
-                        
-                        for result in valid_final_results:
-                            result["camera_id"] = config.OPI_CONFIG.get("device_id", "opi_01")
-                            await processing_queue.put(result)
-                            logger.info("Đã put data vào processing_queue")
+                    
+                    # Gửi thông tin chi tiết của từng người
+                    for result in valid_final_results:
+                        result["camera_id"] = config.OPI_CONFIG.get("device_id", "opi_01")
+                        await processing_queue.put(result)
+                        logger.info("Đã put data vào processing_queue")
                 
+                # ... (Logic tính FPS không đổi) ...
                 frame_number += len(frames_for_detection)
                 end_time = time.time()
                 duration = end_time - start_time
-                fps_current = len(batch_data_paths) / duration if duration > 0 else 0
-                # Giả sử self.fps_avg, self.call_count đã khởi tạo trước đó
-                self.fps_avg = (self.fps_avg * self.call_count + fps_current) / (self.call_count + 1)
-                self.call_count += 1
+                if duration > 0:
+                    fps_current = len(batch_data_paths) / duration
+                    self.fps_avg = (self.fps_avg * self.call_count + fps_current) / (self.call_count + 1)
+                    self.call_count += 1
             except Exception as e:
                 logger.error(f"Lỗi không mong muốn trong xử lý lô: {e}", exc_info=True)
 

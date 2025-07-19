@@ -41,7 +41,12 @@ class ProcessID:
             face_emb = face_res[0]
             age = face_res[1] 
             gender = face_res[2] 
-            race = face_res[4] 
+            race = face_res[4]
+            
+            # 2. Xử lý tọa độ thế giới (thêm Z=0 để debug)
+            world_point_xy = data.get('world_point_xy')
+            world_point_xyz = (*world_point_xy, 0.0) if world_point_xy is not None else None
+            
 
             kwargs = dict(
                 gender=gender,
@@ -51,10 +56,10 @@ class ProcessID:
                 feature_person=feature,
                 face_embedding=face_emb,
                 est_height_m=data.get('est_height_m'),
-                head_point_3d=data.get('head_point_3d'),
+                world_point_xyz=world_point_xyz,
                 bbox=data.get('bbox'),
                 frame_id=data.get('frame_id'), 
-                map_keypoints=data.get('map_keypoints'),
+                map_keypoints=data.get('map_keypoints'), 
                 time_detect=data.get('time_detect')
             )
 
@@ -69,7 +74,7 @@ class ProcessID:
             dur = time.time() - start
             fps = 1 / dur if dur > 0 else 0
             self.fps_avg = (self.fps_avg * (sum(self.stats.values()) - 1) + fps) / sum(self.stats.values())
-            self.frame_index += 1
+            self.frame_index += 1 
             logger.info(f"Processed frame for {person_id} - FPS_avg: {self.fps_avg:.2f}")
             return person_id
         except Exception as e:

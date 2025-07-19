@@ -38,9 +38,9 @@ OPI_CONFIG = {
     "distance_threshold_m": 4.0,
 
     ### <<< THÊM CẤU HÌNH WEBSOCKET VÀO ĐÂY >>> ###
-    "SOCKET_COUNT_URI": "ws://192.168.1.85:8080/api/ws/camera",
+    "SOCKET_COUNT_URI": "ws://192.168.1.43:8080/api/ws/camera",
     "SOCKET_HEIGHT_URI": "ws://192.168.1.168:8080/api/ws/camera",
-    "SOCKET_ID_URI": "ws://192.168.1.85:9090/api/ws/camera",
+    "SOCKET_ID_URI": "ws://192.168.1.43:9090/api/ws/camera",
     "SOCKET_TABLE_ID": 1,
 
     # --- Cấu hình Re-ID ---

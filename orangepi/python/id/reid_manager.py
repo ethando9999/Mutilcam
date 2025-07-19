@@ -76,7 +76,7 @@ class ReIDManager:
     async def create_person(
         self,
         gender, race, age, body_color, feature, face_embedding,
-        est_height_m, head_point_3d,
+        est_height_m, world_point_xyz,
         bbox_data=None, frame_id=None, time_detect=None
     ):
         """
@@ -172,7 +172,7 @@ class ReIDManager:
         person_id,
         gender=None, race=None, age=None,
         body_color=None, feature=None, face_embedding=None,
-        est_height_m=None, head_point_3d=None,
+        est_height_m=None, world_point_xyz=None,
         bbox_data=None, frame_id=None, time_detect=None
     ):
         await self._ensure_db_ready()
@@ -241,7 +241,7 @@ class ReIDManager:
         self, 
         gender=None, race=None, age=None,
         body_color=None, feature=None, face_embedding=None,
-        est_height_m=None, head_point_3d=None,
+        est_height_m=None, world_point_xyz=None,
         bbox_data=None, frame_id=None
     ):
         """
@@ -382,7 +382,7 @@ class ReIDManager:
     #     self, 
     #     gender=None, race=None, age=None,
     #     body_color=None, feature=None, face_embedding=None,
-    #     est_height_m=None, head_point_3d=None,
+    #     est_height_m=None, world_point_xyz=None,
     #     bbox_data=None, frame_id=None
     # ):
     #     """

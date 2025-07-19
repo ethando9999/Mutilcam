@@ -329,7 +329,7 @@ class PersonReID:
         feature_person,
         face_embedding,
         est_height_m,
-        head_point_3d,
+        world_point_3d,
         bbox,
         frame_id,
         map_keypoints,
@@ -357,7 +357,7 @@ class PersonReID:
             feature_person,
             face_embedding,
             est_height_m,     # Thêm chiều cao
-            head_point_3d,    # Thêm tọa độ 3D
+            world_point_3d,    # Thêm tọa độ 3D
             bbox,
             frame_id,
         )
@@ -388,7 +388,7 @@ class PersonReID:
                         feature_person,
                         face_embedding,
                         est_height_m,
-                        head_point_3d,
+                        world_point_3d,
                         bbox,
                         frame_id,
                         time_detect
@@ -405,7 +405,7 @@ class PersonReID:
                     feature_person,
                     face_embedding,
                     est_height_m,
-                    head_point_3d,
+                    world_point_3d,
                     bbox,
                     frame_id,
                     time_detect
@@ -421,7 +421,7 @@ class PersonReID:
             feature_person,
             face_embedding,
             est_height_m,
-            head_point_3d,
+            world_point_3d,
             bbox,
             frame_id,
             time_detect
@@ -434,6 +434,10 @@ class PersonReID:
 
         return temp_id
 
+                # 2. Xử lý tọa độ thế giới (thêm Z=0 để debug)
+        world_point_xy = data.get('world_point_xy')
+        world_point_xyz = (*world_point_xy, 0.0) if world_point_xy is not None else None
+
     async def analyze(self, data: dict, max_retries=3):
         """Xử lý một frame với phát hiện người và ReID một cách bất đồng bộ."""
         if not isinstance(data, dict):
@@ -443,7 +447,9 @@ class PersonReID:
         for attempt in range(1, max_retries + 1):
             try:
                 start_time = time.time()
-
+                            # 2. Xử lý tọa độ thế giới (thêm Z=0 để debug)
+                world_point_xy = data.get('world_point_xy')
+                world_point_xyz = (*world_point_xy, 0.0) if world_point_xy is not None else None
                 # Lấy dữ liệu khớp với output của process_frame_queue
                 frame_id = data.get("frame_id")
                 human_image = data.get("human_box")
@@ -456,7 +462,7 @@ class PersonReID:
                 camera_id = data.get("camera_id", "unknown_cam")
                 distance_mm = data.get("distance_mm")
                 est_height_m = data.get("est_height_m")
-                head_point_3d = data.get("head_point_3d")
+                world_point_3d = world_point_xyz
 
                 time_detect = data.get("time_detect")
 
@@ -519,7 +525,7 @@ class PersonReID:
                         feature_person,
                         face_embedding,
                         est_height_m,    # Thêm chiều cao
-                        head_point_3d,   # Thêm tọa độ 3D
+                        world_point_3d,   # Thêm tọa độ 3D
                         bbox,
                         frame_id,
                         map_keypoints,
@@ -535,7 +541,7 @@ class PersonReID:
                         feature_person,
                         face_embedding,
                         est_height_m,    # Thêm chiều cao
-                        head_point_3d,   # Thêm tọa độ 3D
+                        world_point_3d,   # Thêm tọa độ 3D
                         bbox,
                         frame_id,
                         map_keypoints,

@@ -1,4 +1,4 @@
-from campc.orangepi.python.utils.yolo_pose_rknn2 import HumanDetection, core_mask
+from python.utils.yolo_pose_rknn2 import HumanDetection, core_mask
 # from utils.logging_python_orangepi import setup_logging, get_logger
 import cv2 
 import os

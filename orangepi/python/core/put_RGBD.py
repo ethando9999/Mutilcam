@@ -140,8 +140,9 @@ class FramePutter:
             while not self.stop_event.is_set():
                 # Xử lý backpressure: Nếu queue đầy, chờ một chút
                 if frame_queue.full():
-                    logger.warning("Hàng đợi frame đã đầy. Consumer đang xử lý chậm. Tạm dừng Putter...")
-                    await asyncio.sleep(0.1) 
+                    # Drop oldest frame to make space
+                    dropped = await frame_queue.get()
+                    # logger.warning(f"Frame queue full, dropped oldest frame: {dropped}")
                     continue
 
                 # Thực hiện lấy ảnh từ các camera đồng thời để đồng bộ tốt nhất
