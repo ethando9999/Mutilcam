@@ -175,60 +175,59 @@ class ManagerID:
             await self._schedule_timeout(person_id)
 
     async def _publish_remote(self, temp_id: str, gender, race, age, body_color, feature, face_embedding):
-        """Send to remote ReID and process response."""
-        try:
-            await asyncio.wait_for(self.rabbit._ready.wait(), timeout=1)
-            self.remote_requested.add(temp_id)
-            payload = dict(
-                gender=gender, race=race, age=age,
-                body_color=body_color, feature=feature,
-                face_embedding=face_embedding
-            )
-            fut = await self.rabbit.publish_remote_request(payload, request_id=str(temp_id))
+            """Send to remote ReID and process response."""
+            try:
+                await asyncio.wait_for(self.rabbit._ready.wait(), timeout=1)
+                payload = dict(
+                    gender=gender, race=race, age=age,
+                    body_color=body_color, feature=feature,
+                    face_embedding=face_embedding
+                )
+                fut = await self.rabbit.publish_remote_request(payload, request_id=str(temp_id))
+                self.remote_requested.add(temp_id)
+                async def on_response():
+                    try:
+                        matched = await asyncio.wait_for(fut, timeout=20)
+                        if matched and matched != temp_id:
+                            # cancel and remove timeout task
+                            task = self.timeout_tasks.pop(temp_id, None)
+                            if task:
+                                task.cancel()
+                            # replace and discard temp
+                            await self.reid_manager.replace_temp_person_id(temp_id, matched)
+                            self.temp_id.discard(temp_id)
+                            # enqueue merged as official
+                            meta = await self.reid_manager.get_person_meta(matched)
+                            if meta:
+                                enriched = {
+                                    **meta,
+                                    'frame_id': None,
+                                    'time_detect': None,
+                                    'camera_id': self.config.get('camera_id'),
+                                    'est_height_m': None,
+                                    'head_point_3d': None
+                                }
+                                await self.maybe_put_id_to_queue(enriched)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Remote timeout for {temp_id}")
+                        # fallback: clean flag and reschedule timeout
+                        self.remote_requested.discard(temp_id)
+                        if temp_id not in self.timeout_tasks:
+                            await self._schedule_timeout(temp_id)
+                    except Exception:
+                        logger.exception("Error handling remote response")
+                        self.remote_requested.discard(temp_id)
+                        if temp_id not in self.timeout_tasks:
+                            await self._schedule_timeout(temp_id)
+                    finally:
+                        # ensure flag cleaned
+                        self.remote_requested.discard(temp_id)
 
-            async def on_response():
-                try:
-                    matched = await asyncio.wait_for(fut, timeout=20)
-                    if matched and matched != temp_id:
-                        # cancel and remove timeout task
-                        task = self.timeout_tasks.pop(temp_id, None)
-                        if task:
-                            task.cancel()
-                        # replace and discard temp
-                        await self.reid_manager.replace_temp_person_id(temp_id, matched)
-                        self.temp_id.discard(temp_id)
-                        # enqueue merged as official
-                        meta = await self.reid_manager.get_person_meta(matched)
-                        if meta:
-                            enriched = {
-                                **meta,
-                                'frame_id': None,
-                                'time_detect': None,
-                                'camera_id': self.config.get('camera_id'),
-                                'est_height_m': None,
-                                'world_point_xyz': None
-                            }
-                            await self.maybe_put_id_to_queue(enriched)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Remote timeout for {temp_id}")
-                    # fallback: clean flag and reschedule timeout
-                    self.remote_requested.discard(temp_id)
-                    if temp_id not in self.timeout_tasks:
-                        await self._schedule_timeout(temp_id)
-                except Exception:
-                    logger.exception("Error handling remote response")
-                    self.remote_requested.discard(temp_id)
-                    if temp_id not in self.timeout_tasks:
-                        await self._schedule_timeout(temp_id)
-                finally:
-                    # ensure flag cleaned
-                    self.remote_requested.discard(temp_id)
-
-            asyncio.create_task(on_response())
-        except Exception:
-            logger.exception(f"Error publishing remote for {temp_id}")
-            self.remote_requested.discard(temp_id)
-            await self._schedule_timeout(temp_id)
+                asyncio.create_task(on_response())
+            except Exception:
+                logger.exception(f"Error publishing remote for {temp_id}")
+                self.remote_requested.discard(temp_id)
+                await self._schedule_timeout(temp_id)
 
     async def _schedule_timeout(self, temp_id: str):
         """Schedule removal of low-count temps after timeout."""
