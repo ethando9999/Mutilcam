@@ -35,3 +35,6 @@ dataset
 face_id/
 fastreid/
 
+quantization_rknn/
+
+rknn_env/
