@@ -49,6 +49,9 @@ class FrameProcessor:
         self.debug_dir = os.path.join(config.OPI_CONFIG.get("results_dir", "results"), "debug_projection")
         os.makedirs(self.debug_dir, exist_ok=True)
 
+        self.annotated = os.path.join(config.OPI_CONFIG.get("results_dir", "results"), "annotated")
+        os.makedirs(self.annotated, exist_ok=True)
+
         # --- Quản lý bộ đệm đếm người (THAY THẾ CHO LOGIC CŨ) ---
         self.temp_count_queue = asyncio.Queue()
         self.count_buffer_size = 5 # Kích thước bộ đệm như yêu cầu
@@ -106,7 +109,17 @@ class FrameProcessor:
             await self._run_in_executor(cv2.imwrite, os.path.join(self.debug_dir, f"{base_name}_full_tof_boxed.png"), tof_color_map)
         except Exception as e:
             logger.error(f"Lỗi khi lưu ảnh debug: {e}")
-            
+
+    async def _save_annotated(self, filename: str, image: np.ndarray):
+        """Helper chạy ghi ảnh vào file một cách bất đồng bộ."""
+        loop = asyncio.get_running_loop()
+        try:
+            # offload blocking I/O to executor
+            await loop.run_in_executor(None, cv2.imwrite, filename, image)
+            logger.info(f"Đã lưu file annotated {filename}")
+        except Exception as e:
+            logger.error(f"Không lưu được ảnh annotate {filename}: {e}")
+
     def _get_feet_point(self, keypoints: np.ndarray) -> Optional[tuple[int, int]]:
         """
         Lấy điểm chân (điểm thấp nhất) từ các keypoints.
@@ -250,8 +263,10 @@ class FrameProcessor:
             batch_data_paths = []
             try:
                 item = await asyncio.wait_for(frame_queue.get(), timeout=5.0)
-                if item is None: break
-                batch_data_paths.append(item); frame_queue.task_done()
+                if item is None:
+                    break
+                batch_data_paths.append(item)
+                frame_queue.task_done()
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 # Nếu không có frame nào, vẫn chạy logic gửi số 0 định kỳ
                 await self._manage_people_count_state(0)
@@ -260,40 +275,58 @@ class FrameProcessor:
             while len(batch_data_paths) < self.batch_size:
                 try:
                     item = frame_queue.get_nowait()
-                    if item is None: frame_queue.put_nowait(None); break
-                    batch_data_paths.append(item); frame_queue.task_done()
-                except asyncio.QueueEmpty: break
-            
+                    if item is None:
+                        frame_queue.put_nowait(None)
+                        break
+                    batch_data_paths.append(item)
+                    frame_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+
             try:
                 loaded_data_map = {}
                 frames_for_detection = []
                 for i, (rgb_path, depth_path, amp_path) in enumerate(batch_data_paths):
-                    # ... (logic đọc file)
                     try:
-                        rgb_frame, depth_frame = cv2.imread(rgb_path), np.load(depth_path)
+                        rgb_frame = cv2.imread(rgb_path)
+                        depth_frame = np.load(depth_path)
                         if rgb_frame is not None and depth_frame is not None:
                             frames_for_detection.append(rgb_frame)
                             loaded_data_map[i] = (rgb_frame, depth_frame)
-                    except Exception as e: logger.error(f"Lỗi đọc file {rgb_path}: {e}")
-                if not frames_for_detection: continue
+                    except Exception as e:
+                        logger.error(f"Lỗi đọc file {rgb_path}: {e}")
+                if not frames_for_detection:
+                    continue
 
                 # BƯỚC 2: PHÁT HIỆN NGƯỜI (SONG SONG)
-                detection_results = await asyncio.gather(*[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection], return_exceptions=True) 
+                detection_results = await asyncio.gather(
+                    *[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection],
+                    return_exceptions=True
+                )
 
                 # BƯỚC 3: TẠO TÁC VỤ XỬ LÝ SÂU CHO TẤT CẢ CÁC PHÁT HIỆN HỢP LỆ
                 all_human_tasks = []
                 for i, res in enumerate(detection_results):
-                    if not res or isinstance(res, Exception): continue
-                    kpts_data, boxes_data = res
+                    if not res or isinstance(res, Exception):
+                        continue
+                    kpts_data, boxes_data, annotated_img = res
                     rgb, depth = loaded_data_map[i]
-                    for kpts, box in zip(kpts_data, boxes_data):
+                    for obj_idx, (kpts, box) in enumerate(zip(kpts_data, boxes_data)):
                         if self._is_detection_valid(box, kpts, rgb.shape):
+                            # Tên file annotate
+                            filename = os.path.join(
+                                self.annotated,
+                                f"annot_frame{frame_number + i}_obj{obj_idx}.jpg"
+                            )
+                            # Lưu ảnh bất đồng bộ
+                            asyncio.create_task(self._save_annotated(filename, annotated_img))
+
                             # Tạo task xử lý sâu, không cần tính khoảng cách trước
                             task = self.process_human_async(
                                 frame_number + i, rgb, depth, box, kpts
                             )
                             all_human_tasks.append(task)
-                
+
                 # BƯỚC 4: THU THẬP KẾT QUẢ VÀ GỬI ĐI
                 if not all_human_tasks:
                     await self._manage_people_count_state(0)
@@ -301,24 +334,29 @@ class FrameProcessor:
 
                 final_results = await asyncio.gather(*all_human_tasks, return_exceptions=True)
                 valid_final_results = [res for res in final_results if res and not isinstance(res, Exception)]
-                
+
                 # Gửi số lượng người đếm được
-                await self._manage_people_count_state(len(valid_final_results))
+                frames_with_person = sum(
+                    1
+                    for res in final_results
+                    if res and not isinstance(res, Exception)
+                )
+                await self._manage_people_count_state(frames_with_person)
+
 
                 if valid_final_results:
                     # Gửi thông tin chiều cao
-                    heights_cm = [res["est_height_m"] * 100.0 for res in valid_final_results if res.get("est_height_m") is not None]
+                    heights_cm = [res.get("est_height_m", 0) * 100.0 for res in valid_final_results if res.get("est_height_m") is not None]
                     if heights_cm:
                         height_packet = {"table_id": self.table_id, "heights_cm": heights_cm}
                         asyncio.create_task(self.height_queue.put(height_packet))
-                    
+
                     # Gửi thông tin chi tiết của từng người
                     for result in valid_final_results:
                         result["camera_id"] = config.OPI_CONFIG.get("device_id", "opi_01")
                         await processing_queue.put(result)
                         logger.info("Đã put data vào processing_queue")
-                
-                # ... (Logic tính FPS không đổi) ...
+
                 frame_number += len(frames_for_detection)
                 end_time = time.time()
                 duration = end_time - start_time
@@ -326,6 +364,7 @@ class FrameProcessor:
                     fps_current = len(batch_data_paths) / duration
                     self.fps_avg = (self.fps_avg * self.call_count + fps_current) / (self.call_count + 1)
                     self.call_count += 1
+
             except Exception as e:
                 logger.error(f"Lỗi không mong muốn trong xử lý lô: {e}", exc_info=True)
 

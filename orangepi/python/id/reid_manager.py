@@ -188,7 +188,6 @@ class ReIDManager:
                         "INSERT OR IGNORE INTO Frames(frame_id, timestamp) VALUES (?, ?);",
                         (frame_id, ts)
                     )
-                logger.info("[UPDATE] Frames pass")
                 await self.db.execute(
                     "INSERT INTO Detections(person_id, timestamp, frame_id) VALUES (?, ?, ?);",
                     (person_id, ts, frame_id)
@@ -232,6 +231,7 @@ class ReIDManager:
                 self.tracking_manager.update_track(person_id, bbox_data, frame_id, feature=feat_v)
                 logger.info("Updated track in tracking_manager")
 
+            logger.info(f"[UPDATE] Đã udpate cho ID {person_id}")
             return True
         except Exception as e:
             logger.exception(f"[DB] Failed to update_person: {e}")
@@ -614,8 +614,58 @@ class ReIDManager:
 
             async with self.db_lock:
                 try:
-                    # ... phần DB merge giống như trước ...
+                    logger.info("[DB] Merge temp_id=%s → closest_id=%s", temp_id, closest_id)
 
+                    # 1) Fetch metadata for both IDs
+                    cur = await self.db.execute(
+                        "SELECT person_id, age, gender, race FROM PersonsMeta WHERE person_id IN (?, ?);",
+                        (temp_id, closest_id)
+                    )
+                    rows = await cur.fetchall()
+                    meta = {row[0]: row[1:] for row in rows}
+
+                    # Ensure both entries exist
+                    if temp_id not in meta or closest_id not in meta:
+                        logger.warning("[DB] Missing PersonsMeta for %s or %s", temp_id, closest_id)
+                        return False
+
+                    # Normalize metadata values: treat string 'None' or empty as None
+                    def normalize(fields):
+                        return [
+                            None if (v is None or (isinstance(v, str) and v.strip().lower() == "none")) else v
+                            for v in fields
+                        ]
+
+                    meta_temp  = normalize(meta[temp_id])
+                    meta_close = normalize(meta[closest_id])
+
+                    # Compare fields: if both non-None and unequal, cannot merge
+                    for val_temp, val_close in zip(meta_temp, meta_close):
+                        if val_temp is not None and val_close is not None and val_temp != val_close:
+                            logger.warning(
+                                "[DB] Metadata mismatch — cannot merge: %s vs %s",
+                                meta_temp, meta_close
+                            )
+                            return False
+
+                    # 2) Update all detections to point to the merged ID
+                    await self.db.execute(
+                        "UPDATE Detections SET person_id=? WHERE person_id=?;",
+                        (closest_id, temp_id)
+                    )
+
+                    # 3) Remove temp_id entries from PersonsMeta and Persons
+                    await self.db.execute(
+                        "DELETE FROM PersonsMeta WHERE person_id=?;", (temp_id,)
+                    )
+                    await self.db.execute(
+                        "DELETE FROM Persons WHERE person_id=?;", (temp_id,)
+                    )
+
+                    # 4) Remove temp_id from PersonsVec
+                    await self.db.execute(
+                        "DELETE FROM PersonsVec WHERE person_id=?;", (temp_id,)
+                    )
                     await self.db.commit()
                     logger.info("[DB] Successfully merged %s into %s", temp_id, closest_id)
                 except Exception as e:

@@ -64,7 +64,7 @@ class HumanDetection:
             verbose=False,
             classes=self.classes,
             # device=self.device,
-            conf=0.5,
+            conf=0.65,
             iou=0.4 
         )
         self.results = results[0] 
@@ -85,8 +85,8 @@ class HumanDetection:
         boxes_data = [
             tuple(map(int, box.xyxy[0].tolist())) for box in results[0].boxes
         ]
-
-        return keypoints_data, boxes_data
+        annotated_img = self.results.plot()
+        return keypoints_data, boxes_data, annotated_img
     
     def draw_boxes_and_edges(self):
         # Plot results with filtered boxes
