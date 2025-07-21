@@ -18,10 +18,10 @@ class FaceAnalyze:
     def __init__(self):
         conf = FACE_CONFIG
         # Thresholds
-        self.face_conf   = conf.get("face_detection_conf", 0.8)
-        self.race_conf   = conf.get("race_conf", 0.5)
-        self.gender_conf = conf.get("gender_conf", 0.8)
-        self.age_conf    = conf.get("age_conf", 0.5)
+        self.face_conf   = conf.get("face_detection_conf")
+        self.race_conf   = conf.get("race_conf")
+        self.gender_conf = conf.get("gender_conf")
+        self.age_conf    = conf.get("age_conf")
 
         # Core modules
         self.face_detection = FaceDetection(min_detection_confidence=self.face_conf)
@@ -36,6 +36,8 @@ class FaceAnalyze:
         # FPS tracking
         self.fps_avg    = 0.0
         self.call_count = 0
+        print("Khởi tạo FaceAnalyze thành công với ngưỡng confidences: ")
+        print(f"Race: {self.race_conf}, Gender: {self.gender_conf}, Age: {self.age_conf}")
 
     async def processing_face(self, face_chip, face_roi):
         """

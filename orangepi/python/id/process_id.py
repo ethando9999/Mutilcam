@@ -75,7 +75,7 @@ class ProcessID:
             fps = 1 / dur if dur > 0 else 0
             self.fps_avg = (self.fps_avg * (sum(self.stats.values()) - 1) + fps) / sum(self.stats.values())
             self.frame_index += 1 
-            logger.info(f"Processed frame for {person_id} - FPS_avg: {self.fps_avg:.2f}")
+            logger.info(f"Processed frame {data.get('frame_id')} for {person_id} - FPS_avg: {self.fps_avg:.2f}")
             return person_id
         except Exception as e:
             logger.exception(f"Exception during analyze(): {e}")

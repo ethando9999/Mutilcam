@@ -53,8 +53,7 @@ class FairFacePredictor:
         model_file = MODEL_7 if model_selection == 0 else MODEL_4
         num_classes = 18
         self.model = self._load_resnet(os.path.join(model_dir, model_file), num_classes)
-        print("Khởi tạo model thành công với ngưỡng confidences: ")
-        print(f"Race: {self.r_conf}, Gender: {self.g_conf}, Age: {self.a_conf}")
+
 
     def _load_resnet(self, model_path, num_classes):
         model = torchvision.models.resnet34(pretrained=True)

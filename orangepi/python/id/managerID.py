@@ -274,7 +274,7 @@ class ManagerID:
             return
 
         hp3d = person_meta.get("world_point_xyz")
-        point3D = list(hp3d) if hp3d is not None else [0, 0, 0]
+        point3D = [int(round(x)) for x in hp3d] if hp3d is not None else [0, 0, 0]
 
         payload = {
             "frame_id": person_meta.get("frame_id"),

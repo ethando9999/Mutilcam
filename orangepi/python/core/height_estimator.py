@@ -13,7 +13,7 @@ class HeightEstimator:
         self.cx, self.cy = mtx_rgb[0, 2], mtx_rgb[1, 2]
         
         # --- CÁC HẰNG SỐ CẤU HÌNH ---
-        self.MINIMUM_DISTANCE = 1.2
+        self.MINIMUM_DISTANCE = 0.5
         self.ANKLE_TO_FLOOR_COMPENSATION = 0.08
         self.KNEE_TO_FLOOR_COMPENSATION = 0.45 
         self.TORSO_TO_HEIGHT_RATIO = 3.5
@@ -57,7 +57,7 @@ class HeightEstimator:
         """
         Ước tính chiều cao bằng phương pháp chiếu 3D phân tầng theo bằng chứng.
         """
-        if not (distance_m and self.MINIMUM_DISTANCE <= distance_m < 8.0):
+        if not (distance_m and self.MINIMUM_DISTANCE <= distance_m < 3.5):
             return None, f"D:Ngoài vùng ({distance_m:.1f}m)"
 
         # Định nghĩa các nhóm keypoint
