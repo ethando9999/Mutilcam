@@ -57,7 +57,7 @@ class HeightEstimator:
         """
         Ước tính chiều cao bằng phương pháp chiếu 3D phân tầng theo bằng chứng.
         """
-        if not (distance_m and self.MINIMUM_DISTANCE <= distance_m < 3.5):
+        if not (distance_m and self.MINIMUM_DISTANCE <= distance_m < 3.3):
             return None, f"D:Ngoài vùng ({distance_m:.1f}m)"
 
         # Định nghĩa các nhóm keypoint

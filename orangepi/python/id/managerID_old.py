@@ -7,14 +7,14 @@ from collections import Counter, defaultdict
 import uuid
 import shutil
 import subprocess
-from typing import Optional, Dict
+from typing import Optional
 
 from feature.feature_osnet import FeatureModel
 from .reid_manager import ReIDManager
 from face_processing.face_v2.face_analyze_new import FaceAnalyze
 from rabbitMQ.rabbitMQ_manager import RabbitMQManager
 from utils.logging_python_orangepi import get_logger
-from core.smooth_height import SmoothHeightFilter
+
 logger = get_logger(__name__)
 
 
@@ -62,39 +62,6 @@ class ManagerID:
         self.timeout_tasks = {}
         self.temp_id = set()
         self.stats_lock = asyncio.Lock()
-        
-        # MỚI: Dictionary để lưu trữ các bộ lọc làm mịn chiều cao cho mỗi ID
-        self.height_smoothers: Dict[str, SmoothHeightFilter] = {}
-        # MỚI: Các tham số cho bộ lọc Kalman, có thể đưa vào file config
-        self.height_process_variance = config.get('height_process_variance', 0.01)
-        self.height_measurement_variance = config.get('height_measurement_variance', 1.0)
-
-
-    # MỚI: Hàm helper để lấy hoặc tạo và cập nhật bộ lọc chiều cao
-    def _get_smoothed_height(self, person_id: str, raw_height_m: Optional[float]) -> Optional[float]:
-        """
-        Lấy giá trị chiều cao đã được làm mịn cho một person_id.
-        Tạo một bộ lọc mới nếu chưa tồn tại.
-        """
-        if raw_height_m is None:
-            # Nếu không có chiều cao, thử lấy giá trị cuối cùng từ bộ lọc nếu có
-            if person_id in self.height_smoothers:
-                return self.height_smoothers[person_id].current_estimate
-            return None
-
-        # Nếu bộ lọc cho ID này chưa tồn tại, hãy tạo nó
-        if person_id not in self.height_smoothers:
-            logger.info(f"✨ Creating new height smoother for ID {person_id} with initial value {raw_height_m:.2f}m.")
-            self.height_smoothers[person_id] = SmoothHeightFilter(
-                process_variance=self.height_process_variance,
-                measurement_variance=self.height_measurement_variance,
-                initial_value=raw_height_m
-            )
-        
-        # Cập nhật bộ lọc với số đo mới và trả về giá trị đã làm mịn
-        smoothed_height = self.height_smoothers[person_id].update(raw_height_m)
-        logger.debug(f"Height for {person_id}: Raw={raw_height_m:.2f}m -> Smoothed={smoothed_height:.2f}m")
-        return smoothed_height
 
     async def extract_feature(self, image: np.ndarray) -> np.ndarray:
         return await asyncio.get_running_loop().run_in_executor(
@@ -127,9 +94,6 @@ class ManagerID:
             if closest_id and score >= self.merge_threshold:
                 await self.reid_manager.merge_temp_person_id(temp_id, closest_id)
                 self._move_folder(temp_id, closest_id)
-                # MỚI: Dọn dẹp bộ lọc của ID tạm thời đã được hợp nhất
-                self.height_smoothers.pop(temp_id, None)
-                logger.info(f"🧹 Cleaned up height smoother for merged temp ID {temp_id}.")
                 return closest_id
         except Exception:
             logger.exception(f"Error merging temp {temp_id}")
@@ -148,9 +112,6 @@ class ManagerID:
         """Update or promote a temp ID based on detections and merge/remote logic."""
         # 1) Count this detection
         self.temp_counts[person_id] += 1
-        
-        # <<< SỬA LỖI: Cập nhật bộ lọc ở mỗi lần phát hiện để tăng độ chính xác
-        self._get_smoothed_height(person_id, normalized.get('est_height_m'))
 
         # 2) Local merge if possible
         merged = await self._find_and_merge(person_id)
@@ -165,13 +126,12 @@ class ManagerID:
             await self.reid_manager.update_person(merged, **normalized)
             meta = await self.reid_manager.get_person_meta(merged)
             if meta:
-                smoothed_height = self._get_smoothed_height(merged, normalized.get('est_height_m'))
                 enriched = {
                     **meta,
                     'frame_id': normalized.get('frame_id'),
                     'time_detect': normalized.get('time_detect'),
                     'camera_id': self.config.get('camera_id'),
-                    'est_height_m': smoothed_height,
+                    'est_height_m': normalized.get('est_height_m'),
                     'world_point_xyz': normalized.get('world_point_xyz')
                 }
                 await self.maybe_put_id_to_queue(enriched)
@@ -187,8 +147,6 @@ class ManagerID:
             # discard temp and count
             self.temp_id.discard(person_id)
             self.temp_counts.pop(person_id, None)
-            
-            smoothed_height = self._get_smoothed_height(person_id, normalized.get('est_height_m'))
             # enqueue official ID
             await self.maybe_put_id_to_queue({
                 **normalized,
@@ -196,7 +154,7 @@ class ManagerID:
                 'frame_id': normalized.get('frame_id'),
                 'time_detect': normalized.get('time_detect'),
                 'camera_id': self.config.get('camera_id'),
-                'est_height_m': smoothed_height, # Sử dụng chiều cao đã làm mịn
+                'est_height_m': normalized.get('est_height_m'),
                 'world_point_xyz': normalized.get('world_point_xyz')
             })
             return
@@ -238,22 +196,16 @@ class ManagerID:
                             # replace and discard temp
                             await self.reid_manager.replace_temp_person_id(temp_id, matched)
                             self.temp_id.discard(temp_id)
-                            
-                             # MỚI: Dọn dẹp bộ lọc của temp ID
-                            self.height_smoothers.pop(temp_id, None)
-                            logger.info(f"🧹 Cleaned up height smoother for remote-merged temp ID {temp_id}.")
-                            
                             # enqueue merged as official
                             meta = await self.reid_manager.get_person_meta(matched)
                             if meta:
-                                smoothed_height = self._get_smoothed_height(matched, None)
                                 enriched = {
                                     **meta,
                                     'frame_id': None,
                                     'time_detect': None,
                                     'camera_id': self.config.get('camera_id'),
-                                    'est_height_m': smoothed_height, # Sử dụng giá trị đã làm mịn
-                                    'world_point_xyz': None
+                                    'est_height_m': None,
+                                    'head_point_3d': None
                                 }
                                 await self.maybe_put_id_to_queue(enriched)
                     except asyncio.TimeoutError:
@@ -297,11 +249,6 @@ class ManagerID:
                     self.temp_id.discard(temp_id)
                     self.remote_requested.discard(temp_id)
                     self.temp_counts.pop(temp_id, None)
-                    
-                    # MỚI: Dọn dẹp bộ lọc của ID đã hết hạn
-                    self.height_smoothers.pop(temp_id, None)
-                    logger.info(f"🧹 Cleaned up height smoother for timed-out temp ID {temp_id}.")
-                    
                     # remove from DB and filesystem
                     await self.reid_manager.remove_low_person_ids([temp_id])
                     shutil.rmtree(os.path.join(self.output_dir, f"id_{temp_id}"), ignore_errors=True)
@@ -327,11 +274,7 @@ class ManagerID:
             return
 
         hp3d = person_meta.get("world_point_xyz")
-        point3D = [int(coord) for coord in hp3d] if hp3d is not None else [0, 0, 0]
-        
-        # THAY ĐỔI: Đảm bảo chiều cao là float hợp lệ
-        height_val = person_meta.get("est_height_m")
-        height_m = float(height_val) if height_val is not None else 0.0
+        point3D = [int(round(x)) for x in hp3d] if hp3d is not None else [0, 0, 0]
 
         payload = {
             "frame_id": person_meta.get("frame_id"),
@@ -339,7 +282,7 @@ class ManagerID:
             "gender": self._safe(person_meta.get("gender")),
             "race": self._safe(person_meta.get("race")),
             "age": self._safe(person_meta.get("age")),
-            "height": height_m,
+            "height": float(person_meta.get("est_height_m") or 0.0),
             "time_detect": person_meta.get("time_detect"),
             "camera_id": person_meta.get("camera_id"),
             "point3D": point3D,
@@ -368,14 +311,11 @@ class ManagerID:
                 await self.reid_manager.update_person(matched, **normalized)
                 meta = await self.reid_manager.get_person_meta(matched)
                 if meta:
-                     # <<< SỬA LỖI: Gọi hàm làm mịn để lấy chiều cao đã xử lý
-                    smoothed_height = self._get_smoothed_height(matched, normalized.get("est_height_m"))
- 
                     enriched = {**meta,
                                 "frame_id": normalized["frame_id"],
                                 "time_detect": normalized["time_detect"],
                                 "camera_id": self.config.get("camera_id"),
-                                "est_height_m": smoothed_height,
+                                "est_height_m": normalized.get("est_height_m"),
                                 "world_point_xyz": normalized.get("world_point_xyz")}
                     await self.maybe_put_id_to_queue(enriched)
             return matched
@@ -383,10 +323,7 @@ class ManagerID:
         # No match → create new temp
         temp_id = await self.reid_manager.create_person(**normalized)
         logger.info(f"[CREATE ID] Đã tạo id mới {temp_id}")
-        
-        # <<< SỬA LỖI: Khởi tạo/Cập nhật bộ lọc ngay khi tạo ID mới
-        self._get_smoothed_height(temp_id, normalized.get('est_height_m'))
         self.temp_id.add(temp_id)
         self.temp_counts[temp_id] = 1  # NEW: Count the first detection
         await self._schedule_timeout(temp_id)
-        return temp_id 
+        return temp_id

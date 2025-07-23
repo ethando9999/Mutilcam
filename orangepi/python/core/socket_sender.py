@@ -5,6 +5,7 @@ import json
 import websockets
 import numpy as np
 from utils.logging_python_orangepi import get_logger
+import uuid
 
 logger = get_logger(__name__)
 
@@ -18,6 +19,8 @@ def _numpy_converter(obj):
         return obj.item()
     if isinstance(obj, (np.bool_)):
         return bool(obj)
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
     raise TypeError(f"Đối tượng {obj!r} thuộc loại {type(obj).__name__} không thể chuyển đổi sang JSON")
 
 class Socket_Sender:

@@ -64,7 +64,7 @@ class HumanDetection:
             verbose=False,
             classes=self.classes,
             # device=self.device,
-            conf=0.65,
+            conf=0.4,
             iou=0.4 
         )
         self.results = results[0] 
@@ -82,8 +82,11 @@ class HumanDetection:
 
         # Extract keypoints and bounding boxes 
         keypoints_data = results[0].keypoints.xy.cpu().numpy()
+        # boxes_data = [
+        #     tuple(map(int, box.xyxy[0].tolist())) for box in results[0].boxes
+        # ]
         boxes_data = [
-            tuple(map(int, box.xyxy[0].tolist())) for box in results[0].boxes
+            (*map(int, box.xyxy[0].tolist()), float(box.conf[0])) for box in results[0].boxes
         ]
         # annotated_img = self.results.plot() 
         return keypoints_data, boxes_data

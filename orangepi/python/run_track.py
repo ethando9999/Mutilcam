@@ -7,8 +7,9 @@ import psutil
 
 # Import các module của dự án
 from database.create_db import create_database
-from id.process_id import ProcessID
+from track_local.byte_track import TrackingManager
 import config
+from core.socket_sender import start_socket_sender
 
 # Thiết lập logging
 from utils.logging_python_orangepi import setup_logging, get_logger
@@ -41,8 +42,8 @@ async def main(args):
     logger.info(f"Đang chạy ở chế độ device_id = {device_id}")
 
     if "opi" in device_id:
-        from core.put_frame import start_putter
-        from core.processing import start_processor
+        from core.put_RGBD import start_putter 
+        from core.processing_track import start_processor
         ID_CONFIG = config.OPI_CONFIG
     else:
         logger.error(f"device_id không hợp lệ: '{device_id}'.") 
@@ -58,25 +59,20 @@ async def main(args):
         await create_database(db_path=db_path)
 
     frame_queue = asyncio.Queue(maxsize=5)
-    processing_queue = asyncio.Queue(maxsize=200)
-    id_socket_queue = asyncio.Queue()
+    processing_queue = asyncio.Queue(maxsize=200) 
+    people_count_queue = asyncio.Queue(maxsize=1)
+    height_queue = asyncio.Queue(maxsize=1)
+    track_queue = asyncio.Queue(maxsize=2)
 
     all_tasks = []
 
     try:
         # Khởi tạo process handler
-        processor = ProcessID({
-            **ID_CONFIG,
-            "device_id": device_id,
-            "db_path": db_path
-        },
-        processing_queue,
-        id_socket_queue
-        )
+        tracker = TrackingManager(processing_queue, track_queue)
 
         # 1. Putter
-        camera_id = ID_CONFIG.get("rgb_camera_id", 0)
-        all_tasks.append(asyncio.create_task(start_putter(frame_queue))) 
+        camera_id = ID_CONFIG.get("rgb_camera_id", 0) 
+        all_tasks.append(asyncio.create_task(start_putter(frame_queue, camera_id=camera_id)))
 
         # 2. Processor
         calib_path = ID_CONFIG.get("calib_file_path")
@@ -84,16 +80,21 @@ async def main(args):
             raise FileNotFoundError(f"LỖI: File hiệu chỉnh không được tìm thấy tại '{calib_path}'.")
 
         all_tasks.append(asyncio.create_task(start_processor(
-            frame_queue, processing_queue
+            frame_queue, processing_queue, people_count_queue, height_queue, calib_path
         )))
 
         # 3. ID xử lý
-        all_tasks.append(asyncio.create_task(processor.run()))
+        all_tasks.append(asyncio.create_task(tracker.run()))
+
+        # 4. WebSocket
+        all_tasks.append(asyncio.create_task(start_socket_sender(people_count_queue, ID_CONFIG["SOCKET_COUNT_URI"])))
+        all_tasks.append(asyncio.create_task(start_socket_sender(height_queue, ID_CONFIG["SOCKET_HEIGHT_URI"])))
+        all_tasks.append(asyncio.create_task(start_socket_sender(track_queue, ID_CONFIG["SOCKET_TRACK_URI"])))
 
         # 5. Giám sát
-        # all_tasks.append(asyncio.create_task(monitor_queue(frame_queue, "Frame")))
-        # all_tasks.append(asyncio.create_task(monitor_queue(processing_queue, "Processing")))
-        all_tasks.append(asyncio.create_task(monitor_queue(id_socket_queue, "ID Socket")))
+        all_tasks.append(asyncio.create_task(monitor_queue(frame_queue, "Frame")))
+        all_tasks.append(asyncio.create_task(monitor_queue(processing_queue, "Processing")))
+        all_tasks.append(asyncio.create_task(monitor_queue(track_queue, "Track Socket")))
 
         logger.info(f"Đã khởi tạo {len(all_tasks)} tác vụ. Bắt đầu vòng lặp chính.")
         await asyncio.gather(*all_tasks)
@@ -106,7 +107,7 @@ async def main(args):
         logger.info("Bắt đầu quá trình dọn dẹp tài nguyên...")
         for task in all_tasks:
             if not task.done():
-                task.cancel() 
+                task.cancel()
         await asyncio.gather(*all_tasks, return_exceptions=True)
         logger.info("Tất cả tài nguyên đã được dọn dẹp. Chương trình kết thúc.")
 
