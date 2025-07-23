@@ -64,7 +64,7 @@ class HumanDetection:
             verbose=False,
             classes=self.classes,
             # device=self.device,
-            conf=0.4,
+            conf=0.3,
             iou=0.4 
         )
         self.results = results[0] 

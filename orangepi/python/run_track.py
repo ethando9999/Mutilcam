@@ -62,7 +62,7 @@ async def main(args):
     processing_queue = asyncio.Queue(maxsize=200) 
     people_count_queue = asyncio.Queue(maxsize=1)
     height_queue = asyncio.Queue(maxsize=1)
-    track_queue = asyncio.Queue(maxsize=2)
+    track_queue = asyncio.Queue(maxsize=1)
 
     all_tasks = []
 

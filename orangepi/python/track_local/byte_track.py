@@ -3,11 +3,14 @@ import uuid
 from collections import OrderedDict
 from scipy.optimize import linear_sum_assignment
 import asyncio
-
+from datetime import datetime
+import config
 from .kalman_filter_2D import KalmanFilter2D, chi2inv95
 from utils.logging_python_orangepi import get_logger
 
 logger = get_logger(__name__)
+
+device_id = config.OPI_CONFIG.get("device_id")
 
 class TrackingManager:
     """
@@ -223,12 +226,13 @@ class TrackingManager:
         return results
 
     async def process_track(self, packet: dict):
-        camera_id = packet.get('camera_id')
-        frame_id = packet.get('frame_id')
+        camera_id   = packet.get('camera_id')
+        frame_id    = packet.get('frame_id')
         time_detect = packet.get('time_detect')
-        people = packet.get('people_list', [])
+        people      = packet.get('people_list', [])
 
-        dets = { 
+        # 1) Chuẩn bị dets — có thể rỗng nếu people_list rỗng
+        dets = {
             f"det_{i}": {
                 'bbox': p['bbox'],
                 'world_point': p['world_point_xy']
@@ -236,31 +240,48 @@ class TrackingManager:
             for i, p in enumerate(people)
         }
 
-        mapping = self.update(dets)
+        # 2) Chạy tracking update và build mapping_list
+        mapping = self.update(dets)  # giả sử trả về dict {det_key: track_id}
         mapping_list = [
-            {"id": str(tid), "world_point": dets[d]['world_point']}
-            for d, tid in mapping.items()
+            {
+                "id":   str(track_id),
+                "world_point": dets[det_key]['world_point']
+            }
+            for det_key, track_id in mapping.items()
         ]
 
+        # 3) Tạo result_packet
         result_packet = {
-            'camera_id': camera_id,
-            'frame_id': frame_id,
-            'time_detect': time_detect,
+            'camera_id':    camera_id,
+            'frame_id':     frame_id,
+            'time_detect':  time_detect,
             'total_detect': len(people),
-            'mapping': mapping_list,
+            'mapping':      mapping_list,
         }
+
+        # 4) Nếu processed_queue đã đầy, loại bớt phần tử cũ nhất
+        if self.processed_queue.full():
+            try:
+                _ = self.processed_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+
+        # 5) Đẩy result_packet vào processed_queue
         await self.processed_queue.put(result_packet)
-        logger.info(
-            f"[TRACK] Đã put vào track_queue: {result_packet}"
-        )
+        logger.info(f"[TRACK] Đã put vào track_queue: {result_packet}")
+
 
     async def run(self):
         logger.info("Tracking task started...")
         while True:
             pkt = await self.detection_queue.get()
+
+            # shutdown signal
             if pkt is None:
                 logger.info("Shutting down TrackingManager.")
                 break
+
+            # real packet → process through your existing logic
             try:
                 await self.process_track(pkt)
             except Exception as e:

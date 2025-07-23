@@ -21,6 +21,8 @@ import config
 
 logger = get_logger(__name__)
 
+device_id = config.OPI_CONFIG.get("device_id", "opi_01")
+
 class FrameProcessor:
     """
     Xử lý các lô frame RGB-D, từ phát hiện người cho đến trích xuất thông tin chi tiết.
@@ -62,6 +64,8 @@ class FrameProcessor:
         self.fps_avg = 0.0
         self.call_count = 0    
         self.table_id = config.OPI_CONFIG.get("SOCKET_TABLE_ID", 1)
+        self.send_zero_flag = False
+
         
         logger.info("FrameProcessor (Tối ưu & Tích hợp Websocket với bộ đệm) đã được khởi tạo.")
     # --------------------------------------------------------------------
@@ -144,7 +148,7 @@ class FrameProcessor:
                 # BƯỚC 1: LẤY TỌA ĐỘ SÀN VÀ KHOẢNG CÁCH CÙNG LÚC
                 torso_box = get_torso_box(keypoints, box[:4])
                 feet_point = self._get_feet_point(keypoints)
-                cam_angle = config.OPI_CONFIG.get("CAM_ANGLE_DEG", 15.0)
+                cam_angle = config.OPI_CONFIG.get("CAM_ANGLE_DEG")
 
                 world_data = await self._run_in_executor(
                     self.stereo_projector.get_worldpoint_coordinates,
@@ -156,9 +160,13 @@ class FrameProcessor:
                 
                 distance_mm = world_data["distance_mm"]
                 world_point_xy = world_data["floor_pos_cm"]
-                
-                # Làm tròn tọa độ thế giới (cm) thành số nguyên
-                world_point_xy = tuple(map(int, world_point_xy)) 
+
+                # Làm tròn và giới hạn tọa độ: x ∈ [-150, 150], y ∈ [0, 300]
+                x = max(-150, min(150, int(world_point_xy[0])))
+                y = max(0, min(300, int(world_point_xy[1])))
+
+                world_point_xy = (x, y)
+
 
                 logger.info(f"✅ Người hợp lệ. Khoảng cách: {distance_mm/1000:.2f}m. Bắt đầu xử lý sâu...")
                 distance_m = distance_mm / 1000.0
@@ -201,7 +209,7 @@ class FrameProcessor:
             except Exception as e:
                 logger.error(f"Lỗi xử lý người cho frame {frame_id}: {e}", exc_info=True)
                 return None
-            
+                
     async def _manage_people_count_state(self, current_person_count: int):
         """
         Quản lý bộ đệm đếm người và chỉ gửi đi giá trị ổn định nhất.
@@ -241,9 +249,6 @@ class FrameProcessor:
             packet = {"total_person": stable_count}
             asyncio.create_task(self.people_count_queue.put(packet))
 
-
-    # file: python/core/processing_RGBD.py
-
     async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue):
         """
         Vòng lặp chính: Lấy dữ liệu, điều phối tác vụ và gửi kết quả một cách tối ưu.
@@ -251,114 +256,118 @@ class FrameProcessor:
         frame_number = 0
         while True:
             start_time = time.time()
-            # BƯỚC 1: LẤY VÀ ĐỌC DỮ LIỆU BATCH FRAME
             batch_data_paths = []
             try:
                 item = await asyncio.wait_for(frame_queue.get(), timeout=5.0)
-                if item is None: break
-                batch_data_paths.append(item); frame_queue.task_done()
+                if item is None:
+                    break
+                batch_data_paths.append(item)
+                frame_queue.task_done()
             except (asyncio.TimeoutError, asyncio.CancelledError):
-                await self._manage_people_count_state(0)
                 continue
 
             while len(batch_data_paths) < self.batch_size:
                 try:
                     item = frame_queue.get_nowait()
-                    if item is None: frame_queue.put_nowait(None); break
-                    batch_data_paths.append(item); frame_queue.task_done()
-                except asyncio.QueueEmpty: break
-            
+                    if item is None:
+                        frame_queue.put_nowait(None)
+                        break
+                    batch_data_paths.append(item)
+                    frame_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+
             try:
+                # BƯỚC 1: Load ảnh RGB và depth
                 loaded_data_map = {}
                 frames_for_detection = []
-                for i, (rgb_path, depth_path, amp_path) in enumerate(batch_data_paths):
+                valid_indices = []
+
+                for idx, (rgb_path, depth_path, amp_path) in enumerate(batch_data_paths):
                     try:
-                        rgb_frame, depth_frame = cv2.imread(rgb_path), np.load(depth_path)
+                        rgb_frame = cv2.imread(rgb_path)
+                        depth_frame = np.load(depth_path)
                         if rgb_frame is not None and depth_frame is not None:
                             frames_for_detection.append(rgb_frame)
-                            loaded_data_map[i] = (rgb_frame, depth_frame)
-                    except Exception as e: logger.error(f"Lỗi đọc file {rgb_path}: {e}")
-                if not frames_for_detection: continue
+                            valid_indices.append(idx)
+                            loaded_data_map[idx] = (rgb_frame, depth_frame)
+                    except Exception as e:
+                        logger.error(f"Lỗi đọc file {rgb_path}: {e}")
 
-                # BƯỚC 2: PHÁT HIỆN NGƯỜI (SONG SONG)
-                detection_results = await asyncio.gather(*[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection], return_exceptions=True) 
+                if not frames_for_detection:
+                    continue
 
-                # BƯỚC 3: TẠO TÁC VỤ XỬ LÝ SÂU VÀ ĐẾM NGƯỜI CHO TỪNG FRAME
+                # BƯỚC 2: Phát hiện người (song song)
+                detection_results = await asyncio.gather(
+                    *[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection],
+                    return_exceptions=True
+                )
+
+                # BƯỚC 3: Tạo tác vụ xử lý sâu
                 all_human_tasks = []
-                people_count_per_frame = [] # <-- MỚI: Lưu số người đếm được cho mỗi frame trong batch
+                people_count_per_frame = []
 
-                for i, res in enumerate(detection_results):
+                for res_idx, res in enumerate(detection_results):
+                    orig_idx = valid_indices[res_idx]
                     if not res or isinstance(res, Exception):
-                        people_count_per_frame.append(0) # Ghi nhận 0 người nếu có lỗi hoặc không phát hiện
+                        people_count_per_frame.append(0)
                         continue
-                    
+
                     kpts_data, boxes_data = res
-                    rgb, depth = loaded_data_map[i]
-                    
-                    valid_detections_in_frame = 0 # <-- MỚI: Biến đếm cho frame hiện tại
+                    rgb, depth = loaded_data_map[orig_idx]
+
+                    valid_detections_in_frame = 0
                     for kpts, box in zip(kpts_data, boxes_data):
                         if self._is_detection_valid(box[:4], kpts, rgb.shape):
-                            valid_detections_in_frame += 1 # Tăng biến đếm
+                            valid_detections_in_frame += 1
                             task = self.process_human_async(
-                                frame_number + i, rgb, depth, box, kpts
+                                frame_number + orig_idx, rgb, depth, box, kpts
                             )
                             all_human_tasks.append(task)
-                    
-                    people_count_per_frame.append(valid_detections_in_frame) # Lưu lại số người của frame này
 
-                # BƯỚC 4: GỬI SỐ LƯỢNG NGƯỜI ĐÃ ĐƯỢC LỌC
-                # Lấy số người từ frame cuối cùng trong batch làm giá trị hiện tại
-                current_person_count = people_count_per_frame[-1] if people_count_per_frame else 0
-                await self._manage_people_count_state(current_person_count)
+                    people_count_per_frame.append(valid_detections_in_frame)
 
-                # (5) Thu thập kết quả và đóng gói thành một dict duy nhất
-                if all_human_tasks:
-                    final_results = await asyncio.gather(*all_human_tasks, return_exceptions=True)
-                    valid_results = [
-                        res for res in final_results
-                        if res and not isinstance(res, Exception)
-                    ]
+                # BƯỚC 4: Gọi xử lý người và đóng gói packet
+                final_results = await asyncio.gather(*all_human_tasks, return_exceptions=True)
+                valid_results = [
+                    res for res in final_results
+                    if res and not isinstance(res, Exception)
+                ]
 
-                    if valid_results:
-                        # Gửi heights như cũ
-                        heights_cm = [
-                            res["est_height_m"] * 100.0
-                            for res in valid_results
-                            if res.get("est_height_m") is not None
-                        ]
-                        if heights_cm:
-                            height_packet = {"table_id": self.table_id, "heights_cm": heights_cm}
-                            asyncio.create_task(self.height_queue.put(height_packet))
+                heights_cm = [
+                    res["est_height_m"] * 100.0
+                    for res in valid_results
+                    if res.get("est_height_m") is not None
+                ]
+                if heights_cm:
+                    height_packet = {"table_id": self.table_id, "heights_cm": heights_cm}
+                    asyncio.create_task(self.height_queue.put(height_packet))
 
-                        # Chuẩn bị gói data chung
-                        device_id = config.OPI_CONFIG.get("device_id", "opi_01")
-                        packet = {
-                            "frame_id": frame_number,
-                            "time_detect": datetime.now().isoformat(),
-                            "people_list": [],
-                            "camera_id": device_id,                            
-                        }
+                # Luôn gửi packet (dù people_list rỗng)
+                packet = {
+                    "frame_id": frame_number,
+                    "time_detect": datetime.now().isoformat(),
+                    "people_list": [],
+                    "camera_id": device_id,
+                }
 
-                        # Điền thông tin từng người vào people_list
-                        for res in valid_results:
-                            # copy only the needed fields
-                            person = {
-                                "human_box": res["human_box"],
-                                "body_parts": res["body_parts"],
-                                "world_point_xy": res["world_point_xy"],
-                                "bbox": res["bbox"],
-                                "map_keypoints": res["map_keypoints"],
-                                "distance_mm": res["distance_mm"],
-                                "est_height_m": res["est_height_m"],
-                                "height_status": res["height_status"],
-                            }
-                            packet["people_list"].append(person)
+                for res in valid_results:
+                    person = {
+                        "human_box": res["human_box"],
+                        "body_parts": res["body_parts"],
+                        "world_point_xy": res["world_point_xy"],
+                        "bbox": res["bbox"],
+                        "map_keypoints": res["map_keypoints"],
+                        "distance_mm": res["distance_mm"],
+                        "est_height_m": res["est_height_m"],
+                        "height_status": res["height_status"],
+                    }
+                    packet["people_list"].append(person)
 
-                        # Đẩy 1 lần packet này vào processing_queue
-                        await processing_queue.put(packet)
-                        logger.info(f"Đã put batch data với {len(packet['people_list'])} người vào processing_queue")
+                await processing_queue.put(packet)
+                logger.info(f"Đã put packet với {len(packet['people_list'])} người vào processing_queue")
 
-                # (6) Cập nhật FPS và frame_number
+                # BƯỚC 5: Cập nhật FPS và frame_number
                 frame_number += len(frames_for_detection)
                 end_time = time.time()
                 duration = end_time - start_time
@@ -369,7 +378,7 @@ class FrameProcessor:
                     self.call_count += 1
             except Exception as e:
                 logger.error(f"Lỗi không mong muốn trong xử lý lô: {e}", exc_info=True)
-
+            
 # --------------------------------------------------------------------
 # HÀM KHỞI TẠO WORKER
 # --------------------------------------------------------------------

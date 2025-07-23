@@ -101,6 +101,7 @@ async def start_socket_sender(socket_queue: asyncio.Queue, server_uri: str):
             
             asyncio.create_task(sender.send_packets(packet))
             socket_queue.task_done()
+            await asyncio.sleep(1) 
 
         except asyncio.CancelledError:
             logger.info(f"Sender worker cho {server_uri} bị hủy.")
