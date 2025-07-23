@@ -69,7 +69,7 @@ class Socket_Sender:
                 if self.websocket is None:
                     # Tái kết nối khi cần
                     await self._ensure_connection()
-                    return
+                    continue
 
                 try:
                     # Kiểm tra kết nối

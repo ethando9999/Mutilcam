@@ -157,6 +157,9 @@ class FrameProcessor:
                 distance_mm = world_data["distance_mm"]
                 world_point_xy = world_data["floor_pos_cm"]
                 
+                # Làm tròn tọa độ thế giới (cm) thành số nguyên
+                world_point_xy = tuple(map(int, world_point_xy)) 
+
                 logger.info(f"✅ Người hợp lệ. Khoảng cách: {distance_mm/1000:.2f}m. Bắt đầu xử lý sâu...")
                 distance_m = distance_mm / 1000.0
 

@@ -84,7 +84,7 @@ async def main(args):
         )))
 
         # 3. ID xử lý
-        all_tasks.append(asyncio.create_task(tracker.run()))
+        all_tasks.append(asyncio.create_task(tracker.run())) 
 
         # 4. WebSocket
         all_tasks.append(asyncio.create_task(start_socket_sender(people_count_queue, ID_CONFIG["SOCKET_COUNT_URI"])))
