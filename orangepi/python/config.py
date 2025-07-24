@@ -19,6 +19,7 @@ VEC0_PATH = "/usr/local/lib/vec0.so"
 RABBITMQ_URL = "amqp://new_user_rpi:123456@192.168.1.76:5672/"
 
 # --- CẤU HÌNH CHO Orange Pi (Stereo Vision) ---
+# --- CẤU HÌNH CHO Orange Pi (Stereo Vision) ---
 OPI_CONFIG = {
     # --- Định danh và DB ---
     "device_id": "opi_01",
@@ -38,12 +39,21 @@ OPI_CONFIG = {
     "calib_file_path": os.path.join(os.path.dirname(BASE_DIR), "python/calibration/cali_result", "cam105_0353.npz"),
     "results_dir": os.path.join(os.path.dirname(BASE_DIR), "results"),
     "distance_threshold_m": 4.0,
+    
+    # <<< THÊM CẤU HÌNH MODULE PHÂN TÍCH VÀO ĐÂY >>>
+    # [SỬA LỖI ĐƯỜNG DẪN] - Đảm bảo BASE_DIR trỏ đúng thư mục gốc của dự án
+    "SKIN_TONE_CSV_PATH": os.path.join(BASE_DIR, "core", "forearm_color_results_test.csv"), 
+    
+    "GENDER_MODEL_PATH": os.path.join(BASE_DIR, "models", "yolo11_gender_88test.pt"),
+    "GENDER_CONFIDENCE_THRESHOLD": 0.75,
+    # <<< KẾT THÚC PHẦN THÊM MỚI >>>
 
-    ### <<< THÊM CẤU HÌNH WEBSOCKET VÀO ĐÂY >>> ###
-    "SOCKET_COUNT_URI": "ws://192.168.1.57:8080/api/ws/camera",
-    "SOCKET_HEIGHT_URI": "https://192.168.1.210:8080/api/ws/camera",
-    "SOCKET_TRACK_URI": "ws://192.168.1.57:8080/api/ws/camera",
-    "SOCKET_TABLE_ID": 1,
+    # --- Cấu hình WebSocket ---
+    # "SOCKET_COUNT_URI": "ws://192.168.1.229:8080/api/ws/camera",
+    # "SOCKET_HEIGHT_URI": "https://192.168.1.210:8080/api/ws/camera",
+    # "SOCKET_TRACK_URI": "ws://192.168.1.247:8080/api/ws/camera",
+    "SOCKET_TRACK_COLOR_URI": "ws://192.168.1.247:9090/api/ws/camera",
+    # "SOCKET_TABLE_ID": 1,
 
     # --- Cấu hình Re-ID ---
     "output_dir": DEFAULT_OUTPUT_DIR,

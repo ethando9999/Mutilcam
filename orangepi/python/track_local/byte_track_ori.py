@@ -14,22 +14,24 @@ device_id = config.OPI_CONFIG.get("device_id")
 
 class TrackingManager:
     """
-    ByteTrack-inspired multi-object tracker.
-    [CẬP NHẬT] Gửi một loại payload chi tiết (profile) duy nhất tới một hàng đợi.
+    ByteTrack-inspired multi-object tracker:
+      - High/low confidence split
+      - Cascade IoU matching by track age
+      - Mahalanobis gating
+      - Score smoothing & decay
+      - 8-D Kalman Filter motion model
     """
     def __init__(
         self,
         detection_queue: asyncio.Queue,
-        # << THAY ĐỔI 1: Đơn giản hóa, chỉ nhận một hàng đợi đầu ra >>
-        track_profile_queue: asyncio.Queue,
-        track_thresh: float = 0.5,
-        max_time_lost: int = 30,
-        iou_threshold: float = 0.6,
+        processed_queue: asyncio.Queue,
+        track_thresh: float = 0.3,
+        max_time_lost: int = 60,
+        iou_threshold: float = 0.5,
         ema_alpha: float = 0.9,
     ):
         self.detection_queue = detection_queue
-        self.track_profile_queue = track_profile_queue
-        
+        self.processed_queue = processed_queue
         self.kf = KalmanFilter2D()
         self.tracks = OrderedDict()
 
@@ -165,7 +167,6 @@ class TrackingManager:
                 # EMA score update
                 tr['score'] = self.ema_alpha * det['bbox'][4] + (1 - self.ema_alpha) * tr['score']
                 tr['world_point'] = det['world_point']
-                tr['attributes'] = det['attributes']
                 results[d] = t
                 det_high.pop(d, None)
             # update active pool
@@ -182,7 +183,6 @@ class TrackingManager:
             tr['hits'] += 1
             tr['score'] = self.ema_alpha * det['bbox'][4] + (1 - self.ema_alpha) * tr['score']
             tr['world_point'] = det['world_point']
-            tr['attributes'] = det['attributes']
             results[d] = t
             det_low.pop(d, None)
 
@@ -197,7 +197,6 @@ class TrackingManager:
             tr['hits'] += 1
             tr['score'] = self.ema_alpha * det['bbox'][4] + (1 - self.ema_alpha) * tr['score']
             tr['world_point'] = det['world_point']
-            tr['attributes'] = det['attributes']
             results[d] = t
             det_high.pop(d, None)
 
@@ -214,7 +213,6 @@ class TrackingManager:
                 'hits': 1,
                 'score': det['bbox'][4],
                 'world_point': det['world_point'],
-                'attributes': det['attributes']   
             }
             results[d] = tid
 
@@ -226,90 +224,65 @@ class TrackingManager:
             logger.info(f"Removed stale track: {tid}")
 
         return results
-    
-    
-    # --- PHƯƠNG THỨC ĐỊNH DẠNG PAYLOAD ---
-    def _format_profile_payload(self, track_id: str, track_data: dict, camera_id: str, time_detect: str, frame_id: int, total_detected_in_frame: int) -> dict:
-        """
-        Định dạng PAYLOAD CHI TIẾT (màu sắc, thuộc tính) cho một người.
-        """
-        attrs = track_data.get('attributes', {})
-        gender_analysis = attrs.get('gender_analysis', {})
-        clothing_analysis = attrs.get('clothing_analysis', {})
-        classification = clothing_analysis.get('classification', {})
-        raw_colors = clothing_analysis.get('raw_color_data', {})
 
-        def format_color_list(colors):
-            if not colors: return []
-            return [{"rgb": c['bgr'][::-1], "percentage": c['percentage']} for c in sorted(colors, key=lambda x: x['percentage'], reverse=True)[:5]]
-
-        height_m = track_data.get('est_height_m')
-        
-        return {
-            "frame_id": frame_id,
-            "total_detect": total_detected_in_frame, # << Đã sửa: dùng đúng tổng số người phát hiện
-            "person_id": str(track_id),
-            "gender": gender_analysis.get('gender', 'Unknown').capitalize(),
-            "torso_color": format_color_list(raw_colors.get('torso_colors')),
-            "torso_status": classification.get('sleeve_type', 'Unknown'),
-            "pants_color": format_color_list(raw_colors.get('thigh_colors')),
-            "pants_status": classification.get('pants_type', 'Unknown'),
-            "skin_tone": classification.get('skin_tone_bgr'),
-            "height": round(height_m, 2) if height_m is not None else None,
-            "time_detect": time_detect,
-            "camera_id": camera_id,
-            "world_point_xy": track_data.get('world_point')
-        }
-
-    # --- PHƯƠNG THỨC XỬ LÝ CHÍNH ---
     async def process_track(self, packet: dict):
-        """
-        Xử lý packet từ detection, chạy tracking, và gửi payload chi tiết
-        vào hàng đợi profile.
-        """
-        camera_id = packet.get('camera_id')
-        frame_id = packet.get('frame_id')
+        camera_id   = packet.get('camera_id')
+        frame_id    = packet.get('frame_id')
         time_detect = packet.get('time_detect')
-        people = packet.get('people_list', [])
+        people      = packet.get('people_list', [])
 
-        # << THAY ĐỔI 2: Lấy tổng số người được phát hiện từ packet đầu vào >>
-        total_detected_in_frame = len(people)
-
+        # 1) Chuẩn bị dets — có thể rỗng nếu people_list rỗng
         dets = {
             f"det_{i}": {
-                'bbox': p['bbox'], 'world_point': p['world_point_xy'],
-                'attributes': p['attributes'], 'est_height_m': p.get('est_height_m'),
-            } for i, p in enumerate(people)
+                'bbox': p['bbox'],
+                'world_point': p['world_point_xy']
+            }
+            for i, p in enumerate(people)
         }
 
-        mapping = self.update(dets)
+        # 2) Chạy tracking update và build mapping_list
+        mapping = self.update(dets)  # giả sử trả về dict {det_key: track_id}
+        mapping_list = [
+            {
+                "id":   str(track_id),
+                "world_point": dets[det_key]['world_point']
+            }
+            for det_key, track_id in mapping.items()
+        ]
 
-        # Gửi payload chi tiết cho từng người được kết hợp thành công trong frame này
-        if mapping:
-            profile_packets_sent = 0
-            for det_key, track_id in mapping.items():
-                if track_id in self.tracks:
-                    track_data = self.tracks[track_id]
-                    # << THAY ĐỔI 3: Truyền `total_detected_in_frame` vào hàm định dạng >>
-                    profile_packet = self._format_profile_payload(
-                        track_id, track_data, camera_id, time_detect, frame_id, total_detected_in_frame
-                    )
-                    await self.track_profile_queue.put(profile_packet)
-                    profile_packets_sent += 1
-            if profile_packets_sent > 0:
-                logger.info(f"[TRACK_PROFILE] Đã gửi {profile_packets_sent} packet chi tiết (tổng số phát hiện: {total_detected_in_frame}).")
-    
-    async def run(self):
-        """
-        Vòng lặp chính, nhận packet từ detection_queue và xử lý.
-        """
-        logger.info("Tracking task started (Single-Payload Profile Mode)...")
-        while True:
+        # 3) Tạo result_packet
+        result_packet = {
+            'camera_id':    camera_id,
+            'frame_id':     frame_id,
+            'time_detect':  time_detect,
+            'total_detect': len(people),
+            'mapping':      mapping_list,
+        }
+
+        # 4) Nếu processed_queue đã đầy, loại bớt phần tử cũ nhất
+        if self.processed_queue.full():
             try:
-                pkt = await self.detection_queue.get()
-                if pkt is None:
-                    logger.info("Shutting down TrackingManager.")
-                    break
+                _ = self.processed_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+
+        # 5) Đẩy result_packet vào processed_queue
+        await self.processed_queue.put(result_packet)
+        logger.info(f"[TRACK] Đã put vào track_queue: {result_packet}")
+
+
+    async def run(self):
+        logger.info("Tracking task started...")
+        while True:
+            pkt = await self.detection_queue.get()
+
+            # shutdown signal
+            if pkt is None:
+                logger.info("Shutting down TrackingManager.")
+                break
+
+            # real packet → process through your existing logic
+            try:
                 await self.process_track(pkt)
             except Exception as e:
                 logger.error(f"Error in tracking loop: {e}", exc_info=True)

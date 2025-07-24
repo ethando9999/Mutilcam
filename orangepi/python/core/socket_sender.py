@@ -1,110 +1,78 @@
-# file: core/socket_sender.py
+# file: python/core/socket_sender.py (Đã thêm log payload)
 
 import asyncio
 import json
-import websockets
-import numpy as np
-from utils.logging_python_orangepi import get_logger
 import uuid
+import numpy as np
+import websockets
+from websockets.exceptions import ConnectionClosed, InvalidStatus
+from utils.logging_python_orangepi import get_logger
 
 logger = get_logger(__name__)
 
 def _numpy_converter(obj):
     """
-    Hàm helper để chuyển đổi các kiểu dữ liệu NumPy sang kiểu dữ liệu JSON.
+    Hàm helper để chuyển đổi các kiểu dữ liệu không thể tuần tự hóa của NumPy và UUID
+    sang các kiểu dữ liệu gốc của Python mà JSON có thể hiểu được.
     """
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, (np.floating, np.integer)):
-        return obj.item()
-    if isinstance(obj, (np.bool_)):
-        return bool(obj)
-    if isinstance(obj, uuid.UUID):
-        return str(obj)
+    if isinstance(obj, np.ndarray): return obj.tolist()
+    if isinstance(obj, (np.floating, np.integer)): return obj.item()
+    if isinstance(obj, np.bool_): return bool(obj)
+    if isinstance(obj, uuid.UUID): return str(obj)
     raise TypeError(f"Đối tượng {obj!r} thuộc loại {type(obj).__name__} không thể chuyển đổi sang JSON")
 
-class Socket_Sender:
-    """
-    Quản lý một kết nối WebSocket bền vững, mạnh mẽ.
-    Tự động kết nối lại và xác minh kết nối trước mỗi lần gửi.
-    """
-    def __init__(self, server_uri: str):
-        self.server_uri = server_uri
-        self.websocket = None
-        self.lock = asyncio.Lock()
-        # Khởi tạo kết nối ngay khi tạo đối tượng
-        self._connect_task = asyncio.create_task(self._ensure_connection())
-        logger.info(f"Socket_Sender khởi tạo cho URI: {self.server_uri}")
 
-    async def _ensure_connection(self):
+class SocketSender:
+    """
+    Một worker quản lý một kết nối WebSocket bền vững và mạnh mẽ.
+    - Lắng nghe dữ liệu từ một hàng đợi (asyncio.Queue).
+    - Tự động kết nối lại khi mất kết nối (Retry Connect).
+    - Ghi log lỗi kết nối một cách tinh gọn và ghi log payload gửi đi.
+    """
+    def __init__(self, uri: str, data_queue: asyncio.Queue, name: str = "SocketSender", retry_delay: int = 3):
+        self.name = name
+        self.data_queue = data_queue
+        self.retry_delay = retry_delay
+        self.uri = self._sanitize_uri(uri)
+        logger.info(f"[{self.name}] Khởi tạo worker cho URI: {self.uri}")
+
+    def _sanitize_uri(self, uri: str) -> str:
+        """Kiểm tra và sửa scheme của URI nếu cần thiết."""
+        if uri.startswith("https://"):
+            logger.warning(f"[{self.name}] URI bắt đầu bằng 'https://'. Tự động đổi thành 'wss://'.")
+            return uri.replace("https://", "wss://", 1)
+        if uri.startswith("http://"):
+            logger.warning(f"[{self.name}] URI bắt đầu bằng 'http://'. Tự động đổi thành 'ws://'.")
+            return uri.replace("http://", "ws://", 1)
+        if not (uri.startswith("ws://") or uri.startswith("wss://")):
+             raise ValueError(f"[{self.name}] URI '{uri}' không hợp lệ. Phải bắt đầu bằng ws:// hoặc wss://.")
+        return uri
+
+    async def run(self):
         """
-        Thử kết nối ban đầu và giữ lại kết nối.
+        Vòng lặp chính của worker: kết nối và gửi dữ liệu từ hàng đợi.
         """
-        while self.websocket is None:
+        while True:
             try:
-                self.websocket = await asyncio.wait_for(
-                    websockets.connect(self.server_uri), timeout=5.0
-                )
-                logger.info(f">>> Kết nối WebSocket thành công tới {self.server_uri}! <<<")
-                return
+                async with websockets.connect(self.uri, ping_interval=20, ping_timeout=20) as websocket:
+                    logger.info(f"[{self.name}] ✅ Kết nối WebSocket thành công tới {self.uri}")
+                    while True:
+                        packet = await self.data_queue.get()
+                        try:
+                            message_to_send = json.dumps(packet, default=_numpy_converter)
+                            
+                            # << THAY ĐỔI: Thêm log để hiển thị payload >>
+                            logger.info(f"[{self.name}] >> Gửi packet: {message_to_send}")
+                            
+                            await websocket.send(message_to_send)
+                        except TypeError as e:
+                            logger.error(f"[{self.name}] Lỗi chuyển đổi JSON: {e}. Bỏ qua packet.")
+                        finally:
+                            self.data_queue.task_done()
+
+            except (ConnectionRefusedError, ConnectionClosed, asyncio.TimeoutError, InvalidStatus) as e:
+                logger.warning(f"[{self.name}] ❌ Lỗi kết nối tới {self.uri}: {e}. Sẽ thử lại sau {self.retry_delay} giây.")
             except Exception as e:
-                logger.error(f"Kết nối tới {self.server_uri} thất bại: {e}. Thử lại sau 3 giây.")
-                self.websocket = None
-                await asyncio.sleep(3)
-
-    async def send_packets(self, packets: dict):
-        """
-        Gửi dữ liệu một cách an toàn. Tự động xử lý mọi sự cố kết nối
-        và sẽ thử lại cho đến khi gửi tin nhắn thành công.
-        """
-        message_to_send = json.dumps(packets, indent=2, default=_numpy_converter)
-
-        async with self.lock:
-            # Đảm bảo kết nối ban đầu đã hoàn thành
-            if self._connect_task is not None:
-                await self._connect_task
-                self._connect_task = None
-
-            while True:
-                if self.websocket is None:
-                    # Tái kết nối khi cần
-                    await self._ensure_connection()
-                    continue
-
-                try:
-                    # Kiểm tra kết nối
-                    await asyncio.wait_for(self.websocket.ping(), timeout=2.0)
-                    await self.websocket.send(message_to_send)
-                    logger.info(f"✅ Đã gửi tới {self.server_uri}:\n{message_to_send}")
-                    return
-                except Exception as e:
-                    logger.warning(
-                        f"Kết nối tới {self.server_uri} có vấn đề ({type(e).__name__}). Đóng và tạo lại..."
-                    )
-                    try:
-                        await self.websocket.close()
-                    except Exception:
-                        pass
-                    self.websocket = None
-
-async def start_socket_sender(socket_queue: asyncio.Queue, server_uri: str):
-    """
-    Worker lắng nghe hàng đợi và gửi gói tin đi.
-    """
-    sender = Socket_Sender(server_uri)
-    
-    while True:
-        try:
-            packet = await socket_queue.get()
-            if packet is None:
-                break
+                logger.error(f"[{self.name}] ❌ Lỗi không mong muốn: {e}. Sẽ thử lại sau {self.retry_delay} giây.", exc_info=True)
             
-            asyncio.create_task(sender.send_packets(packet))
-            socket_queue.task_done()
-            await asyncio.sleep(1) 
-
-        except asyncio.CancelledError:
-            logger.info(f"Sender worker cho {server_uri} bị hủy.")
-            break
-        except Exception as e:
-            logger.error(f"Lỗi không mong muốn trong sender worker cho {server_uri}: {e}", exc_info=True)
+            await asyncio.sleep(self.retry_delay)

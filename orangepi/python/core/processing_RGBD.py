@@ -6,13 +6,15 @@ import os
 from datetime import datetime
 import numpy as np
 import time
-from typing import Optional
-from collections import Counter 
+from typing import Optional, Deque
+from collections import Counter, deque
 
-# Giả định các module này tồn tại và hoạt động đúng
+# --- MODULES CỦA DỰ ÁN ---
 from utils.logging_python_orangepi import get_logger
 from utils.yolo_pose import HumanDetection
-from utils.pose_color_signature_new import PoseColorSignatureExtractor
+# Sử dụng phiên bản mới nhất của các module trích xuất đặc trưng
+from pose_color_signature import PoseColorSignatureExtractor_Final as PoseColorSignatureExtractor
+from clothing_classifier import ClothingClassifier_Final
 from utils.cut_body_part import extract_body_parts_from_frame
 from .stereo_projector import StereoProjector
 from .keypoints_handle import get_head_center, get_torso_box, adjust_keypoints_to_box
@@ -344,17 +346,15 @@ class FrameProcessor:
 # HÀM KHỞI TẠO WORKER
 # --------------------------------------------------------------------
 async def start_processor(frame_queue: asyncio.Queue, processing_queue: asyncio.Queue, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue, calib_path: str):
-    """
-    Khởi tạo và chạy FrameProcessor worker.
-    """
     logger.info("Khởi động worker xử lý...")
     try:
-        processor = FrameProcessor( 
+        processor = FrameProcessor(
             calib_path=calib_path,
+            processing_queue=processing_queue,
             people_count_queue=people_count_queue,
-            height_queue=height_queue,
-            batch_size=1
+            height_queue=height_queue
         )
-        await processor.process_frame_queue(frame_queue, processing_queue)
+        # [SỬA LỖI] Gọi hàm chỉ với `frame_queue` vì processing_queue đã có trong self
+        await processor.process_frame_queue(frame_queue)
     except Exception as e:
-        logger.error(f"Lỗi nghiêm trọng trong start_processor: {e}", exc_info=True) 
+        logger.error(f"Lỗi nghiêm trọng trong start_processor: {e}", exc_info=True)

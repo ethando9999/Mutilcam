@@ -1,4 +1,3 @@
-
 import logging
 from utils.yolo_pose import HumanDetection
 import cv2 

@@ -239,5 +239,5 @@ class TrackingManager:
     def get_active_tracks(self):
         """
         Trả list các person_id hiện đang active (chưa stale).
-        """
-        return list(self.tracks.keys())
+        """ 
+        return list(self.tracks.keys()) 

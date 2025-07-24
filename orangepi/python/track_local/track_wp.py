@@ -6,7 +6,7 @@ import queue
 from threading import Thread
 import time 
 import asyncio
-
+from typing import Dict
 # Giả sử các lớp này đã được định nghĩa ở nơi khác trong dự án của bạn
 from .kalman_filter_2D import KalmanFilter2D, chi2inv95 as chi2inv95_bbox
 from .kalman_filter_world_points import KalmanFilterWorldPoint, chi2inv95 as chi2inv95_wp
@@ -39,6 +39,9 @@ class TrackingManager:
         self.kf_bbox = KalmanFilter2D()
         self.kf_wp = KalmanFilterWorldPoint()
         self.tracks = OrderedDict()
+        
+        self.track_attributes: Dict[uuid.UUID, Dict] = {}
+
 
         self.gating_threshold_bbox = gating_threshold_bbox
         self.gating_threshold_wp = gating_threshold_wp
@@ -74,174 +77,163 @@ class TrackingManager:
             tr['time_since_update'] += 1
 
     def _remove_stale_tracks(self):
-        stale_ids = [tid for tid, tr in self.tracks.items()
-                     if tr['time_since_update'] > self.max_time_lost]
+        stale_ids = [tid for tid, tr in self.tracks.items() if tr['time_since_update'] > self.max_time_lost]
         for tid in stale_ids:
             del self.tracks[tid]
+            # <--- [SỬA LỖI] Xóa cả thuộc tính của track cũ để tránh memory leak --->
+            if tid in self.track_attributes:
+                del self.track_attributes[tid]
             logger.info(f"Removed stale track: {tid}")
 
-    def _add_track(self, bbox, world_point):
+    # <--- [TỐI ƯU] Các hàm _add và _update giờ nhận vào toàn bộ `person_data` --->
+    def _add_track(self, person_data: Dict):
         new_id = uuid.uuid4()
-        meas_bbox = self.bbox_tlbr_to_xywh(bbox)
-        mean_bbox, cov_bbox = self.kf_bbox.initiate(meas_bbox)
-        mean_wp, cov_wp = self.kf_wp.initiate(
-            np.array(world_point, dtype=np.float32))
+        # Khởi tạo Kalman Filters
+        mean_bbox, cov_bbox = self.kf_bbox.initiate(self.bbox_tlbr_to_xywh(person_data['bbox']))
+        mean_wp, cov_wp = self.kf_wp.initiate(np.array(person_data['world_point_xy'], dtype=np.float32))
+        
+        # Lưu trạng thái động
         self.tracks[new_id] = {
             'mean_bbox': mean_bbox, 'covariance_bbox': cov_bbox,
             'mean_wp': mean_wp, 'covariance_wp': cov_wp,
             'time_since_update': 0, 'hits': 1
         }
+        # Lưu trạng thái thuộc tính
+        self.track_attributes[new_id] = person_data
         logger.info(f"Added new track: {new_id}")
         return new_id
 
-    def _update_matched_track(self, tid, bbox, world_point):
+    def _update_matched_track(self, tid: uuid.UUID, person_data: Dict):
         tr = self.tracks[tid]
-        meas_bbox = self.bbox_tlbr_to_xywh(bbox)
-        tr['mean_bbox'], tr['covariance_bbox'] = self.kf_bbox.update(
-            tr['mean_bbox'], tr['covariance_bbox'], meas_bbox)
-        meas_wp = np.array(world_point, dtype=np.float32)
-        tr['mean_wp'], tr['covariance_wp'] = self.kf_wp.update(
-            tr['mean_wp'], tr['covariance_wp'], meas_wp)
+        # Cập nhật Kalman Filters
+        tr['mean_bbox'], tr['covariance_bbox'] = self.kf_bbox.update(tr['mean_bbox'], tr['covariance_bbox'], self.bbox_tlbr_to_xywh(person_data['bbox']))
+        tr['mean_wp'], tr['covariance_wp'] = self.kf_wp.update(tr['mean_wp'], tr['covariance_wp'], np.array(person_data['world_point_xy'], dtype=np.float32))
+        
         tr['time_since_update'] = 0
         tr['hits'] += 1
+        # Cập nhật trạng thái thuộc tính với thông tin mới nhất
+        self.track_attributes[tid] = person_data
 
-    def update(self, detections: dict):
-        # 1) Dự đoán và dọn dẹp
+
+    # <--- [TỐI ƯU] Hàm update giờ nhận vào list `people` trực tiếp --->
+    def update(self, people_list: List[Dict]):
         self._predict_all_tracks()
         self._remove_stale_tracks()
 
         active_ids = list(self.tracks.keys())
-        det_ids = list(detections.keys())
-        # Nếu không có track cũ hoặc không có detections
-        if not active_ids or not det_ids:
-            results = {}
-            for d in det_ids:
-                results[d] = self._add_track(
-                    detections[d]['bbox'], detections[d]['world_point'])
-            return results
+        
+        if not active_ids or not people_list:
+            # Nếu không có track cũ, tạo mới cho tất cả detection
+            return {f"det_{i}": self._add_track(p_data) for i, p_data in enumerate(people_list)}
 
-        # 2) Tạo ma trận chi phí
-        N, M = len(det_ids), len(active_ids)
+        N, M = len(people_list), len(active_ids)
         cost = np.full((N, M), np.inf)
-        for i, d in enumerate(det_ids):
-            bb = detections[d]['bbox']
-            wp = np.array(detections[d]['world_point']).reshape(1, 2)
+
+        # Tính toán ma trận chi phí
+        for i, p_data in enumerate(people_list):
+            bb = p_data['bbox']
+            wp = np.array(p_data['world_point_xy']).reshape(1, 2)
             for j, tid in enumerate(active_ids):
                 tr = self.tracks[tid]
-                d_wp = self.kf_wp.gating_distance(
-                    tr['mean_wp'], tr['covariance_wp'], wp)[0]
-                if d_wp > self.gating_threshold_wp:
-                    continue
-                d_bb = self.kf_bbox.gating_distance(
-                    tr['mean_bbox'], tr['covariance_bbox'],
-                    self.bbox_tlbr_to_xywh(bb).reshape(1, 4))[0]
-                if d_bb > self.gating_threshold_bbox:
-                    continue
+                # Tính toán chi phí (logic giữ nguyên)
+                d_wp = self.kf_wp.gating_distance(tr['mean_wp'], tr['covariance_wp'], wp)[0]
+                if d_wp > self.gating_threshold_wp: continue
+                d_bb = self.kf_bbox.gating_distance(tr['mean_bbox'], tr['covariance_bbox'], self.bbox_tlbr_to_xywh(bb).reshape(1, 4))[0]
+                if d_bb > self.gating_threshold_bbox: continue
                 pred_bb = self.xywh_to_tlbr(tr['mean_bbox'][:4])
                 cost_iou = 1 - self.iou(pred_bb, bb)
                 cost_maha = d_wp / self.gating_threshold_wp
-                cost[i, j] = (self.iou_cost_weight * cost_iou +
-                              (1 - self.iou_cost_weight) * cost_maha)
+                cost[i, j] = (self.iou_cost_weight * cost_iou + (1 - self.iou_cost_weight) * cost_maha)
 
-        # Nếu không có cặp nào khả thi, tạo track mới cho tất cả
         if not np.isfinite(cost).any():
-            results = {}
-            for d in det_ids:
-                results[d] = self._add_track(
-                    detections[d]['bbox'], detections[d]['world_point'])
-            return results
+             return {f"det_{i}": self._add_track(p_data) for i, p_data in enumerate(people_list)}
 
-        # 3) Gán ghép Hungarian
         rows, cols = linear_sum_assignment(cost)
-        results = {}
-        matched_r, matched_c = set(), set()
+        
+        mapping = {}
+        matched_dets = set()
+        # Xử lý các cặp đã match
         for r, c in zip(rows, cols):
             if np.isfinite(cost[r, c]):
-                det, tid = det_ids[r], active_ids[c]
-                self._update_matched_track(
-                    tid, detections[det]['bbox'], detections[det]['world_point'])
-                results[det] = tid
-                matched_r.add(r)
-                matched_c.add(c)
+                tid = active_ids[c]
+                self._update_matched_track(tid, people_list[r])
+                mapping[f"det_{r}"] = tid
+                matched_dets.add(r)
+        
+        # Xử lý các detection không match (tạo track mới)
+        for r in range(N):
+            if r not in matched_dets:
+                new_tid = self._add_track(people_list[r])
+                mapping[f"det_{r}"] = new_tid
 
-        # 4) Track mới cho unmatched detections
-        for r in set(range(N)) - matched_r:
-            det = det_ids[r]
-            results[det] = self._add_track(
-                detections[det]['bbox'], detections[det]['world_point'])
-
-        return results
-
-    def get_active_tracks(self):
-        """Chuyển đổi sang định dạng JSON-serializable."""
-        data = {}
-        for tid, tr in self.tracks.items():
-            bbox = self.xywh_to_tlbr(tr['mean_bbox'][:4]).tolist()
-            wp = tr['mean_wp'][:2].tolist()
-            data[str(tid)] = {
-                'bbox_tlbr': bbox,
-                'world_point': wp,
-                'time_since_update': tr['time_since_update'],
-                'hits': tr['hits']
-            }
-        return data
+        return mapping
 
     async def process_track(self, packet: dict):
         """
-        Xử lý một gói dữ liệu từ detection_queue, thực hiện tracking,
-        và đưa kết quả vào processed_queue.
-        Packet kết quả bao gồm camera_id, frame_id, time_detect, total_detect,
-        và một list 'mapping' các đối tượng đã được gán ID.
+        Xử lý packet, chạy tracking và gửi đi payload cho từng người.
+        Phiên bản này gọn hơn do hàm update đã được tối ưu.
         """
-        # Bước 1: Trích xuất thông tin cơ bản từ packet đầu vào.
-        # Giả định packet đầu vào có chứa 'camera_id'.
         camera_id = packet.get('camera_id')
         frame_id = packet.get('frame_id')
         time_detect = packet.get('time_detect')
         people = packet.get('people_list', [])
         
-        # Bước 2: Tính toán tổng số detection trong frame này.
-        total_detect = len(people)
+        # Chạy thuật toán tracking. Hàm update giờ nhận trực tiếp `people` list.
+        mapping_from_tracker = self.update(people)
         
-        # Bước 3: Chuẩn bị dữ liệu detection cho hàm update của tracker.
-        dets = {
-            f"det_{i}": {
-                'bbox': p['bbox'], 
-                'world_point': p['world_point_xy'] 
-            } 
-            for i, p in enumerate(people)
-        }
-        
-        # Bước 4: Chạy thuật toán tracking để nhận về dictionary ánh xạ.
-        mapping_from_tracker = self.update(dets)
-        
-        # Bước 5: Chuyển đổi từ dictionary sang định dạng list mong muốn.
-        mapping_list = [
-            {
-                "id": str(track_id),
-                "world_point": dets[det_id]['world_point']
-            }
-            for det_id, track_id in mapping_from_tracker.items()
-        ]
-        
-        # Bước 6: Tạo gói kết quả cuối cùng với tất cả các trường yêu cầu.
-        result_packet = {
-            'camera_id': camera_id,         # <-- Trường mới
-            'frame_id': frame_id,
-            'time_detect': time_detect,
-            'total_detect': total_detect,   # <-- Trường mới
-            'mapping': mapping_list
-        }
-        
-        # Bước 7: Đưa gói dữ liệu vào queue và ghi log.
-        await self.processed_queue.put(result_packet)
-        logger.info(f"[TRACK] đã put vào processed_queue: {result_packet}")
+        # Nếu không có track nào, kết thúc sớm
+        if not mapping_from_tracker:
+            return
+
+        # Lặp qua các track hợp lệ của frame hiện tại để tạo và gửi payload
+        for track_id in mapping_from_tracker.values():
+            try:
+                # <--- [TỐI ƯU] Lấy thông tin thuộc tính trực tiếp từ tracker --->
+                person_data = self.track_attributes[track_id]
+                
+                clothing = person_data.get('clothing_analysis') or {}
+                gender = person_data.get('gender_analysis') or {}
+                
+                # Định dạng lại payload (logic giữ nguyên)
+                regional_analysis = clothing.get("regional_analysis", {})
+                torso_colors_raw = regional_analysis.get("torso_colors") or []
+                pants_colors_raw = (regional_analysis.get("thigh_colors") or []) + \
+                                   (regional_analysis.get("shin_colors") or [])
+
+                torso_color_payload = [{"rgb": c[0][::-1], "percentage": round(c[1], 2)} for c in torso_colors_raw]
+                pants_color_payload = [{"rgb": c[0][::-1], "percentage": round(c[1], 2)} for c in pants_colors_raw]
+
+                final_person_payload = {
+                    "frame_id": frame_id,
+                    "person_id": str(track_id),
+                    "gender": gender.get('gender', 'Unknown'),
+                    "torso_color": torso_color_payload,
+                    "torso_status": clothing.get("sleeve_type", "N/A"),
+                    "pants_color": pants_color_payload,
+                    "pants_status": clothing.get("pants_type", "N/A"),
+                    "skin_tone": tuple(map(int, clothing["skin_tone"])) if clothing.get("skin_tone") is not None else None,
+                    "height": round(person_data['est_height_m'], 2) if person_data.get('est_height_m') else None,
+                    "time_detect": time_detect,
+                    "camera_id": camera_id,
+                    "world_point_xy": person_data.get('world_point_xy')
+                }
+                
+                await self.processed_queue.put(final_person_payload)
+                logger.info(f"[TRACK] Sent payload for person_id: {str(track_id)}")
+
+            except KeyError:
+                logger.warning(f"Track ID {track_id} found in mapping but not in attributes. Skipping.")
+            except Exception as e:
+                logger.error(f"Unexpected error while creating payload for track {track_id}: {e}", exc_info=True)
 
     async def run(self):
-        print(">>> Tracking task started. Waiting for detection batches...")
+        logger.info(">>> Tracking task started. Waiting for detection batches...")
         while True:
-            pkt = await self.detection_queue.get()
-            if pkt is None:
-                break
-            await self.process_track(pkt)
-            self.detection_queue.task_done()
+            try:
+                pkt = await self.detection_queue.get()
+                if pkt is None:
+                    break
+                await self.process_track(pkt)
+                self.detection_queue.task_done()
+            except Exception as e:
+                logger.error(f"Critical error in tracking loop: {e}", exc_info=True)

@@ -6,18 +6,25 @@ import os
 from datetime import datetime
 import numpy as np
 import time
-from typing import Optional
+from typing import Optional,Dict
 from collections import Counter 
-
+import json
 # Giả định các module này tồn tại và hoạt động đúng
 from utils.logging_python_orangepi import get_logger
 from utils.yolo_pose import HumanDetection
 from utils.pose_color_signature_new import PoseColorSignatureExtractor
 from utils.cut_body_part import extract_body_parts_from_frame
 from .stereo_projector import StereoProjector
-from .keypoints_handle import get_head_center, get_torso_box, adjust_keypoints_to_box
+from .keypoints_handle import get_head_center, get_torso_box, adjust_keypoints_to_box, get_optimal_feet_point
 from .height_estimator import HeightEstimator
 import config
+
+# ======================= PHẦN MÃ MỚI ĐƯỢC THÊM VÀO =======================
+# --- TÍCH HỢP CÁC MODULE PHÂN TÍCH ---
+from pose_color_signature import PoseColorAnalyzer
+from clothing_classifier import ClothingClassifier
+from gender_yolo import GenderRecognition 
+# ===================== KẾT THÚC PHẦN MÃ MỚI ĐƯỢC THÊM VÀO =====================
 
 logger = get_logger(__name__)
 
@@ -25,53 +32,57 @@ device_id = config.OPI_CONFIG.get("device_id", "opi_01")
 
 class FrameProcessor:
     """
-    Xử lý các lô frame RGB-D, từ phát hiện người cho đến trích xuất thông tin chi tiết.
-    Tích hợp logic gửi dữ liệu qua WebSocket một cách thông minh và làm mịn dữ liệu.
+    [PHIÊN BẢN TỐI ƯU HOÀN CHỈNH - 23/07]
+    - Sửa lỗi AttributeError do thiếu khởi tạo temp_count_queue.
+    - Tích hợp logic xử lý batch và đếm người chi tiết.
+    - Logic xử lý đồng bộ và hiệu quả.
     """
-    def __init__(self, calib_path: str, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue, batch_size: int = 2):
-        """
-        Khởi tạo tất cả các module cần thiết và các biến trạng thái.
-        """
-        # ... (các phần khởi tạo detector, pose_processor, stereo_projector, height_estimator không đổi)
+    def __init__(
+        self,
+        calib_path: str,
+        people_count_queue: asyncio.Queue,
+        height_queue: asyncio.Queue,
+        processing_queue: asyncio.Queue,
+        batch_size: int = 1
+    ):
+        # --- 1. Khởi tạo các module ---
         self.detector = HumanDetection()
-        self.pose_processor = PoseColorSignatureExtractor()
         self.stereo_projector = StereoProjector(calib_file_path=calib_path)
-        
         mtx_rgb = self.stereo_projector.params.get('mtx_rgb')
         if mtx_rgb is None: raise ValueError("mtx_rgb không có trong file hiệu chỉnh.")
         self.height_estimator = HeightEstimator(mtx_rgb)
+
+        self.color_extractor = PoseColorAnalyzer(k_per_region=5, merge_threshold=25.0)
         
-        # Lưu lại các queue để sử dụng
+        skin_csv_path = config.OPI_CONFIG.get("SKIN_TONE_CSV_PATH")
+        self.clothing_classifier = ClothingClassifier(
+            skin_csv_path=skin_csv_path,
+            skin_color_threshold=38.0,
+            clothing_color_similarity_threshold=35.0
+        )
+        self.gender_model = GenderRecognition(
+            model_path=config.OPI_CONFIG.get("GENDER_MODEL_PATH"),
+            confidence_threshold=config.OPI_CONFIG.get("GENDER_CONFIDENCE_THRESHOLD")
+        )
+
+        # --- 2. Khởi tạo Queues, Semaphore và các biến trạng thái ---
         self.people_count_queue = people_count_queue
         self.height_queue = height_queue
-        
         self.semaphore = asyncio.Semaphore(4)
         self.batch_size = batch_size
-        
-        self.debug_dir = os.path.join(config.OPI_CONFIG.get("results_dir", "results"), "debug_projection")
-        os.makedirs(self.debug_dir, exist_ok=True)
-
-        # --- Quản lý bộ đệm đếm người (THAY THẾ CHO LOGIC CŨ) ---
-        self.temp_count_queue = asyncio.Queue()
-        self.count_buffer_size = 3 # Kích thước bộ đệm như yêu cầu
-
-        # Các biến cũ không còn cần thiết
-        # self.is_in_no_people_state = True
-        # self.last_zero_sent_time = 0
-        # self.PERIODIC_ZERO_INTERVAL = 10 
-
-        self.pass_count = -1
+        self.table_id = config.OPI_CONFIG.get("SOCKET_TABLE_ID")
         self.fps_avg = 0.0
-        self.call_count = 0    
-        self.table_id = config.OPI_CONFIG.get("SOCKET_TABLE_ID", 1)
-        self.send_zero_flag = False
-
+        self.call_count = 0
         
-        logger.info("FrameProcessor (Tối ưu & Tích hợp Websocket với bộ đệm) đã được khởi tạo.")
-    # --------------------------------------------------------------------
-    # CÁC HÀM PHỤ TRỢ (HELPERS)
-    # --------------------------------------------------------------------
+        # [SỬA LỖI] Khởi tạo các thuộc tính cho việc đếm người
+        self.temp_count_queue = asyncio.Queue()
+        self.count_buffer_size = 3
+        
+        logger.info(f"✅ FrameProcessor đã được khởi tạo.")
 
+    async def _run_in_executor(self, func, *args, **kwargs):
+        return await asyncio.to_thread(func, *args, **kwargs)
+        
     def _is_detection_valid(self, box: tuple, keypoints: np.ndarray, frame_shape: tuple) -> bool:
         x1, y1, x2, y2 = box
         h, w = frame_shape[:2]
@@ -87,6 +98,75 @@ class FrameProcessor:
         if valid_kpts_count < 4:
             return False
         return True
+
+    async def _create_analysis_panel_async(self, person_image: np.ndarray, attributes: dict, filename: str):
+        """[SỬA LỖI & CẬP NHẬT] Tạo ảnh panel từ gói thuộc tính mới."""
+        try:
+            gender_analysis = attributes.get("gender_analysis", {})
+            clothing_analysis = attributes.get("clothing_analysis", {})
+            classification = clothing_analysis.get("classification", {})
+            raw_colors = clothing_analysis.get("raw_color_data", {})
+
+            gender_label = gender_analysis.get('gender', 'N/A').capitalize()
+            sleeve_type = classification.get("sleeve_type", "N/A")
+            pants_type = classification.get("pants_type", "N/A")
+
+            display_data = {
+                f"Loai Ao: {sleeve_type}": raw_colors.get("torso_colors"),
+                f"Loai Quan: {pants_type}": raw_colors.get("thigh_colors"),
+            } 
+
+            img_h, img_w = person_image.shape[:2]
+            panel_w = 400
+            summary_h = max(img_h, 400)
+            summary_img = np.full((summary_h, img_w + panel_w, 3), (255, 255, 255), dtype=np.uint8)
+            summary_img[0:img_h, 0:img_w] = person_image
+
+            text_x, text_color = img_w + 20, (0, 0, 0)
+            y_pos = 30
+            def draw_text(text, y, font_scale=0.6, thickness=1):
+                cv2.putText(summary_img, text, (text_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness)
+                return y + 30
+
+            y_pos = draw_text("Ket Qua Phan Tich", y_pos, 0.7, 2)
+            y_pos = draw_text(f"Gioi Tinh: {gender_label}", y_pos)
+            
+            for label, colors_data in display_data.items():
+                y_pos = draw_text(label, y_pos, 0.6, 2)
+                if colors_data:
+                    for color_info in sorted(colors_data, key=lambda x: x["percentage"], reverse=True)[:3]:
+                        bgr, pct = color_info["bgr"], color_info["percentage"]
+                        cv2.rectangle(summary_img, (text_x + 15, y_pos), (text_x + 45, y_pos + 20), tuple(map(int, bgr)), -1)
+                        draw_text(f"BGR: {bgr}, {pct:.1f}%", y_pos + 16, 0.5)
+                        y_pos += 25
+            
+            output_path = os.path.join(self.analysis_output_dir, filename)
+            await self._run_in_executor(cv2.imwrite, output_path, summary_img)
+
+        except Exception as e:
+            logger.error(f"Không thể tạo panel '{filename}': {e}", exc_info=True)
+
+    # =============================================================================
+
+    
+    async def _get_clothing_analysis_async(self, rgb_frame: np.ndarray, keypoints: np.ndarray) -> Optional[Dict]:
+        """
+        Pipeline phân tích quần áo: gọi module xử lý đầy đủ và trả về kết quả.
+        """
+        try:
+            # Gọi hàm xử lý đầy đủ và trả về kết quả trực tiếp.
+            # Việc phân loại (classification) đã được thực hiện BÊN TRONG hàm này rồi.
+            analysis_result = await self.color_extractor.process_body_color_async(
+                rgb_frame, 
+                keypoints,
+                self.clothing_classifier # Truyền classifier vào để nó sử dụng
+            )
+            return analysis_result
+            
+        except Exception as e: 
+            logger.error(f"Lỗi trong pipeline phân tích trang phục: {e}", exc_info=True) 
+            return None
+    # ===================== KẾT THÚC PHẦN MÃ MỚI ĐƯỢC THÊM VÀO =====================
 
     async def _run_in_executor(self, func, *args):
         return await asyncio.to_thread(func, *args)
@@ -111,103 +191,65 @@ class FrameProcessor:
         except Exception as e:
             logger.error(f"Lỗi khi lưu ảnh debug: {e}")
             
-    def _get_feet_point(self, keypoints: np.ndarray) -> Optional[tuple[int, int]]:
-        """
-        Lấy điểm chân (điểm thấp nhất) từ các keypoints.
-        Ưu tiên các điểm mắt cá chân (ankle) có confidence cao.
-        YOLOv8-Pose keypoints: 15: left_ankle, 16: right_ankle.
-        """
-        if keypoints.shape[0] <= 16: return None # Đảm bảo có đủ keypoints
-        
-        ankle_kpts = keypoints[[15, 16], :]
-        
-        # Lọc các keypoint có confidence > 0.3 (một ngưỡng hợp lý)
-        if keypoints.shape[1] >= 3:
-            visible_ankles = ankle_kpts[ankle_kpts[:, 2] > 0.3]
-        else: # Dự phòng nếu không có confidence
-            visible_ankles = ankle_kpts[np.sum(ankle_kpts, axis=1) > 0]
-            
-        if len(visible_ankles) == 0:
-            return None
-        
-        # Tìm điểm chân thấp nhất trên ảnh (có tọa độ v lớn nhất)
-        lowest_foot = visible_ankles[np.argmax(visible_ankles[:, 1])]
-        
-        return int(lowest_foot[0]), int(lowest_foot[1])
-
     # --------------------------------------------------------------------
     # HÀM XỬ LÝ CHÍNH (CORE PROCESSING)
     # --------------------------------------------------------------------
 
-    async def process_human_async(self, frame_id: int, rgb_frame: np.ndarray, tof_depth_map: np.ndarray, box: tuple, keypoints: np.ndarray):
+    # file: python/core/processing_RGBD.py
+
+    async def process_human_async(self, frame_id: int, rgb_frame: np.ndarray, tof_depth_map: np.ndarray, box: tuple, keypoints: np.ndarray) -> Optional[Dict]:
         """
-        Luồng xử lý tối ưu cho một người. Gọi hàm cấp cao để lấy tọa độ và khoảng cách.
+        [TỐI ƯU HOÀN CHỈNH] Luồng xử lý cho một người, tích hợp tất cả các bước phân tích.
         """
         async with self.semaphore:
             try:
-                # BƯỚC 1: LẤY TỌA ĐỘ SÀN VÀ KHOẢNG CÁCH CÙNG LÚC
-                torso_box = get_torso_box(keypoints, box[:4])
-                feet_point = self._get_feet_point(keypoints)
-                cam_angle = config.OPI_CONFIG.get("CAM_ANGLE_DEG")
-
-                world_data = await self._run_in_executor(
-                    self.stereo_projector.get_worldpoint_coordinates,
-                    torso_box, feet_point, tof_depth_map, cam_angle
-                )
-
-                if world_data is None:
-                    return None # Lỗi đã được log bên trong hàm
-                
-                distance_mm = world_data["distance_mm"]
-                world_point_xy = world_data["floor_pos_cm"]
-
-                # Làm tròn và giới hạn tọa độ: x ∈ [-150, 150], y ∈ [0, 300]
-                x = max(-150, min(150, int(world_point_xy[0])))
-                y = max(0, min(300, int(world_point_xy[1])))
-
-                world_point_xy = (x, y)
-
-
-                logger.info(f"✅ Người hợp lệ. Khoảng cách: {distance_mm/1000:.2f}m. Bắt đầu xử lý sâu...")
-                distance_m = distance_mm / 1000.0
-
-                # BƯỚC 2: CHẠY SONG SONG CÁC TÁC VỤ CÒN LẠI
-                height_task = self._run_in_executor(self.height_estimator.estimate, keypoints, distance_m)
-                
-                human_box_img = rgb_frame[box[1]:box[3], box[0]:box[2]]
+                box_int = tuple(map(int, box[:4]))
+                human_box_img = rgb_frame[box_int[1]:box_int[3], box_int[0]:box_int[2]]
                 if human_box_img.size == 0: return None
-                
-                adjusted_keypoints = adjust_keypoints_to_box(keypoints, box[:4])
-                body_parts_task = self._run_in_executor(extract_body_parts_from_frame, human_box_img, adjusted_keypoints)
-                projection_task = self._run_in_executor(self.stereo_projector.project_rgb_box_to_tof, box[:4], distance_mm, tof_depth_map.shape)
 
-                (est_height_m, height_status), body_parts_boxes, tof_box_projected = await asyncio.gather(
-                    height_task, body_parts_task, projection_task
+                # --- BƯỚC 1: CHẠY SONG SONG CÁC PHÂN TÍCH ---
+                gender_task = self._run_in_executor(self.gender_model.predict, human_box_img)
+                world_data_task = self._run_in_executor(
+                    self.stereo_projector.get_worldpoint_coordinates,
+                    get_torso_box(keypoints, box_int), get_optimal_feet_point(keypoints, box_int), 
+                    tof_depth_map, config.OPI_CONFIG.get("CAM_ANGLE_DEG")
+                )
+                
+                gender_analysis, world_data = await asyncio.gather(gender_task, world_data_task, return_exceptions=True)
+
+                # --- BƯỚC 2: XỬ LÝ KẾT QUẢ VÀ CÁC TÁC VỤ PHỤ THUỘC ---
+                est_height_m, height_status = None, "N/A"
+                if not isinstance(world_data, Exception) and world_data and world_data.get("distance_mm"):
+                    est_height_m, height_status = await self._run_in_executor(
+                        self.height_estimator.estimate, keypoints, world_data["distance_mm"] / 1000.0
+                    )
+                
+                # Chạy phân tích quần áo SAU KHI có kết quả giới tính
+                clothing_analysis = await self.color_extractor.process_and_classify(
+                    image=rgb_frame, keypoints=keypoints, classifier=self.clothing_classifier, 
+                    external_data={"gender_analysis": gender_analysis}
                 )
 
-                if tof_box_projected:
-                    debug_base_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S%f')}_F{frame_id}"
-                    asyncio.create_task(self.save_debug_images(debug_base_name, rgb_frame.copy(), tof_depth_map.copy(), box[:4], tof_box_projected))
-                
-                # Bỏ logic head_point_3d cũ
-                
-                logger.info(f"✅✅ Xử lý hoàn tất: Khoảng cách={distance_m:.2f}m, "
-                            f"Chiều cao={(f'{est_height_m:.2f}m' if est_height_m is not None else 'None')} ({height_status}), "
-                            f"Vị trí sàn={('({:.1f}, {:.1f}) cm'.format(*world_point_xy)) if world_point_xy else 'Không có'}")
-
-                return {
-                    "frame_id": frame_id, 
-                    "human_box": human_box_img, 
-                    "body_parts": body_parts_boxes,
-                    "world_point_xy": world_point_xy, # <--- KEY MỚI
+                # --- BƯỚC 3: ĐÓNG GÓI TẤT CẢ THUỘC TÍNH ĐỂ GỬI CHO TRACKER ---
+                person_attributes = {
                     "bbox": box, "map_keypoints": keypoints,
-                    "distance_mm": distance_mm, 
-                    "est_height_m": est_height_m, 
+                    "gender_analysis": gender_analysis if not isinstance(gender_analysis, Exception) else {},
+                    "clothing_analysis": clothing_analysis if not isinstance(clothing_analysis, Exception) else {},
+                    "world_data": world_data if not isinstance(world_data, Exception) else {},
+                    "est_height_m": est_height_m,
                     "height_status": height_status,
-                    "time_detect": datetime.now().isoformat()
                 }
+                
+                logger.info(f"✅ [Frame {frame_id}] Phân tích người hoàn tất: GT={(person_attributes['gender_analysis'] or {}).get('gender', 'N/A')}")
+                
+                # Tạo panel debug trong một tác vụ nền
+                panel_name = f"panel_F{frame_id}_{datetime.now().strftime('%H%M%S%f')}.jpg"
+                asyncio.create_task(self._create_analysis_panel_async(human_box_img.copy(), person_attributes, panel_name))
+
+                return person_attributes
+
             except Exception as e:
-                logger.error(f"Lỗi xử lý người cho frame {frame_id}: {e}", exc_info=True)
+                logger.error(f"Lỗi nghiêm trọng khi xử lý người cho frame {frame_id}: {e}", exc_info=True)
                 return None
                 
     async def _manage_people_count_state(self, current_person_count: int):
@@ -250,151 +292,104 @@ class FrameProcessor:
             asyncio.create_task(self.people_count_queue.put(packet))
 
     async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue):
-        """
-        Vòng lặp chính: Lấy dữ liệu, điều phối tác vụ và gửi kết quả một cách tối ưu.
-        """
         frame_number = 0
         while True:
-            start_time = time.time()
-            batch_data_paths = []
             try:
-                item = await asyncio.wait_for(frame_queue.get(), timeout=5.0)
-                if item is None:
-                    break
-                batch_data_paths.append(item)
-                frame_queue.task_done()
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                continue
-
-            while len(batch_data_paths) < self.batch_size:
+                batch_data_paths = []
                 try:
-                    item = frame_queue.get_nowait()
-                    if item is None:
-                        frame_queue.put_nowait(None)
-                        break
-                    batch_data_paths.append(item)
-                    frame_queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
-
-            try:
-                # BƯỚC 1: Load ảnh RGB và depth
-                loaded_data_map = {}
-                frames_for_detection = []
-                valid_indices = []
-
-                for idx, (rgb_path, depth_path, amp_path) in enumerate(batch_data_paths):
-                    try:
-                        rgb_frame = cv2.imread(rgb_path)
-                        depth_frame = np.load(depth_path)
-                        if rgb_frame is not None and depth_frame is not None:
-                            frames_for_detection.append(rgb_frame)
-                            valid_indices.append(idx)
-                            loaded_data_map[idx] = (rgb_frame, depth_frame)
-                    except Exception as e:
-                        logger.error(f"Lỗi đọc file {rgb_path}: {e}")
-
-                if not frames_for_detection:
+                    item = await asyncio.wait_for(frame_queue.get(), timeout=5.0)
+                    if item is None: break
+                    batch_data_paths.append(item); frame_queue.task_done()
+                except asyncio.TimeoutError:
+                    await self._manage_people_count_state(0)
                     continue
 
-                # BƯỚC 2: Phát hiện người (song song)
-                detection_results = await asyncio.gather(
-                    *[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection],
-                    return_exceptions=True
-                )
+                while len(batch_data_paths) < self.batch_size:
+                    try:
+                        item = frame_queue.get_nowait()
+                        if item is None: frame_queue.put_nowait(None); break
+                        batch_data_paths.append(item); frame_queue.task_done()
+                    except asyncio.QueueEmpty: break
+                
+                start_time = time.time()
+                
+                loaded_data_map = {}
+                frames_for_detection = []
+                for i, (rgb_path, depth_path, _) in enumerate(batch_data_paths):
+                    try:
+                        rgb_frame, depth_frame = cv2.imread(rgb_path), np.load(depth_path)
+                        if rgb_frame is not None and depth_frame is not None:
+                            frames_for_detection.append(rgb_frame)
+                            loaded_data_map[i] = (rgb_frame, depth_frame)
+                    except Exception as e: logger.error(f"Lỗi đọc file {rgb_path}: {e}")
+                if not frames_for_detection: continue
 
-                # BƯỚC 3: Tạo tác vụ xử lý sâu
+                detection_results = await asyncio.gather(*[self._run_in_executor(self.detector.run_detection, f) for f in frames_for_detection], return_exceptions=True) 
+
                 all_human_tasks = []
                 people_count_per_frame = []
 
-                for res_idx, res in enumerate(detection_results):
-                    orig_idx = valid_indices[res_idx]
+                for i, res in enumerate(detection_results):
                     if not res or isinstance(res, Exception):
                         people_count_per_frame.append(0)
                         continue
-
+                    
                     kpts_data, boxes_data = res
-                    rgb, depth = loaded_data_map[orig_idx]
-
+                    rgb, depth = loaded_data_map[i]
+                    
                     valid_detections_in_frame = 0
-                    for kpts, box in zip(kpts_data, boxes_data):
-                        if self._is_detection_valid(box[:4], kpts, rgb.shape):
-                            valid_detections_in_frame += 1
-                            task = self.process_human_async(
-                                frame_number + orig_idx, rgb, depth, box, kpts
-                            )
-                            all_human_tasks.append(task)
-
+                    if kpts_data is not None and boxes_data is not None:
+                        for kpts, box in zip(kpts_data, boxes_data):
+                            if self._is_detection_valid(box, kpts, rgb.shape):
+                                valid_detections_in_frame += 1
+                                task = self.process_human_async(frame_number + i, rgb, depth, box, kpts)
+                                all_human_tasks.append(task)
+                    
                     people_count_per_frame.append(valid_detections_in_frame)
 
-                # BƯỚC 4: Gọi xử lý người và đóng gói packet
-                final_results = await asyncio.gather(*all_human_tasks, return_exceptions=True)
-                valid_results = [
-                    res for res in final_results
-                    if res and not isinstance(res, Exception)
-                ]
+                current_person_count = people_count_per_frame[-1] if people_count_per_frame else 0
+                await self._manage_people_count_state(current_person_count)
 
-                heights_cm = [
-                    res["est_height_m"] * 100.0
-                    for res in valid_results
-                    if res.get("est_height_m") is not None
-                ]
-                if heights_cm:
-                    height_packet = {"table_id": self.table_id, "heights_cm": heights_cm}
-                    asyncio.create_task(self.height_queue.put(height_packet))
+                if not all_human_tasks:
+                    frame_number += len(frames_for_detection)
+                    continue
 
-                # Luôn gửi packet (dù people_list rỗng)
-                packet = {
-                    "frame_id": frame_number,
-                    "time_detect": datetime.now().isoformat(),
-                    "people_list": [],
-                    "camera_id": device_id,
-                }
-
-                for res in valid_results:
-                    person = {
-                        "human_box": res["human_box"],
-                        "body_parts": res["body_parts"],
-                        "world_point_xy": res["world_point_xy"],
-                        "bbox": res["bbox"],
-                        "map_keypoints": res["map_keypoints"],
-                        "distance_mm": res["distance_mm"],
-                        "est_height_m": res["est_height_m"],
-                        "height_status": res["height_status"],
+                final_results = await asyncio.gather(*all_human_tasks)
+                valid_final_results = [res for res in final_results if res] 
+                
+                if valid_final_results:
+                    heights_cm = [res["est_height_m"] * 100.0 for res in valid_final_results if res.get("est_height_m")]
+                    if heights_cm:
+                        await self.height_queue.put({"table_id": self.table_id, "heights_cm": heights_cm})
+                    
+                    packet_for_tracker = {
+                        "frame_id": frame_number, "time_detect": datetime.now().isoformat(),
+                        "people_list": valid_final_results, "camera_id": device_id
                     }
-                    packet["people_list"].append(person)
+                    await processing_queue.put(packet_for_tracker)
+                    logger.info(f"[Frame {frame_number}] Đã gửi packet với {len(valid_final_results)} người tới tracker.")
 
-                await processing_queue.put(packet)
-                logger.info(f"Đã put packet với {len(packet['people_list'])} người vào processing_queue")
-
-                # BƯỚC 5: Cập nhật FPS và frame_number
-                frame_number += len(frames_for_detection)
-                end_time = time.time()
-                duration = end_time - start_time
+                duration = time.time() - start_time
                 if duration > 0:
-                    fps_current = len(batch_data_paths) / duration
-                    self.fps_avg = (self.fps_avg * self.call_count + fps_current) / (self.call_count + 1)
-                    logger.info("FPS Avg Processing: %.2f", self.fps_avg)
+                    current_fps = len(batch_data_paths) / duration
+                    self.fps_avg = (self.fps_avg * self.call_count + current_fps) / (self.call_count + 1)
                     self.call_count += 1
+                    logger.info(f"FPS Avg Processing: {self.fps_avg:.2f}")
+
+                frame_number += len(frames_for_detection)
             except Exception as e:
-                logger.error(f"Lỗi không mong muốn trong xử lý lô: {e}", exc_info=True)
-            
-# --------------------------------------------------------------------
-# HÀM KHỞI TẠO WORKER
-# --------------------------------------------------------------------
+                logger.error(f"Lỗi không mong muốn trong process_frame_queue: {e}", exc_info=True)
+
 async def start_processor(frame_queue: asyncio.Queue, processing_queue: asyncio.Queue, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue, calib_path: str):
-    """
-    Khởi tạo và chạy FrameProcessor worker.
-    """
     logger.info("Khởi động worker xử lý...")
     try:
-        processor = FrameProcessor( 
+        processor = FrameProcessor(
             calib_path=calib_path,
+            processing_queue=processing_queue,
             people_count_queue=people_count_queue,
-            height_queue=height_queue,
-            batch_size=1
+            height_queue=height_queue
         )
+        # [SỬA LỖI] Gọi hàm với đúng số lượng tham số
         await processor.process_frame_queue(frame_queue, processing_queue)
     except Exception as e:
-        logger.error(f"Lỗi nghiêm trọng trong start_processor: {e}", exc_info=True) 
-
+        logger.error(f"Lỗi nghiêm trọng trong start_processor: {e}", exc_info=True)
