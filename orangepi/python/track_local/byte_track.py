@@ -25,9 +25,9 @@ class TrackingManager:
         self,
         detection_queue: asyncio.Queue,
         processed_queue: asyncio.Queue,
-        track_thresh: float = 0.5,
-        max_time_lost: int = 30,
-        iou_threshold: float = 0.6,
+        track_thresh: float = 0.3,
+        max_time_lost: int = 60,
+        iou_threshold: float = 0.5,
         ema_alpha: float = 0.9,
     ):
         self.detection_queue = detection_queue

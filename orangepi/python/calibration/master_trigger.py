@@ -8,7 +8,7 @@ import threading
 
 # --- CẤU HÌNH CHUNG ---
 SLAVE_IP = "192.168.100.2"
-TCP_PORT = 5007
+TCP_PORT = 5005
 CAPTURE_COUNT = 3000
 CAPTURE_DELAY = 2
 

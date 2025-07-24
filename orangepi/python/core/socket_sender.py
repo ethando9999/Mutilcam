@@ -89,22 +89,21 @@ class Socket_Sender:
 
 async def start_socket_sender(socket_queue: asyncio.Queue, server_uri: str):
     """
-    Worker lắng nghe hàng đợi và gửi gói tin đi.
+    Worker lắng nghe hàng đợi và gửi gói tin đi (thứ tự, throttle 1s).
     """
     sender = Socket_Sender(server_uri)
     
     while True:
-        try:
-            packet = await socket_queue.get()
-            if packet is None:
-                break
-            
-            asyncio.create_task(sender.send_packets(packet))
-            socket_queue.task_done()
-            await asyncio.sleep(1) 
-
-        except asyncio.CancelledError:
-            logger.info(f"Sender worker cho {server_uri} bị hủy.")
+        packet = await socket_queue.get()
+        if packet is None:
             break
+
+        try:
+            # Gửi và chờ cho xong trước khi sleep
+            await sender.send_packets(packet)
+            socket_queue.task_done()
         except Exception as e:
-            logger.error(f"Lỗi không mong muốn trong sender worker cho {server_uri}: {e}", exc_info=True)
+            logger.error(f"Lỗi gửi packet: {e}", exc_info=True)
+
+        # Chặn 1s sau mỗi lần gửi
+        await asyncio.sleep(0.5)

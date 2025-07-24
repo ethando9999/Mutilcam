@@ -1,11 +1,25 @@
 import cv2
-from utils.config_camera import CameraHandler
 
-cam0 = CameraHandler(camera_index=0)
+# Mở camera mặc định (index 0)
+cap = cv2.VideoCapture(0)
 
-frame = cam0.capture_main_frame()
+if not cap.isOpened():
+    print("Không mở được camera.")
+    exit()
 
-cv2.imwrite('captured_frame.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
-print("Đã lưu captured_frame.jpg")
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Không đọc được frame.")
+        break
 
-cam0.stop_camera()
+    # Hiển thị frame
+    cv2.imshow('Camera', frame)
+
+    # Nhấn 'q' để thoát
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Giải phóng tài nguyên
+cap.release()
+cv2.destroyAllWindows()

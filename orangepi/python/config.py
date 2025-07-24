@@ -42,7 +42,7 @@ OPI_CONFIG = {
     ### <<< THÊM CẤU HÌNH WEBSOCKET VÀO ĐÂY >>> ###
     "SOCKET_COUNT_URI": "ws://192.168.1.57:8080/api/ws/camera",
     "SOCKET_HEIGHT_URI": "https://192.168.1.210:8080/api/ws/camera",
-    "SOCKET_TRACK_URI": "ws://192.168.1.57:8080/api/ws/camera",
+    "SOCKET_TRACK_URI": "ws://192.168.1.247:8080/api/ws/camera",
     "SOCKET_TABLE_ID": 1,
 
     # --- Cấu hình Re-ID ---

@@ -341,7 +341,9 @@ class FrameProcessor:
                 ]
                 if heights_cm:
                     height_packet = {"table_id": self.table_id, "heights_cm": heights_cm}
-                    asyncio.create_task(self.height_queue.put(height_packet))
+                    # schedule, không chờ
+                    asyncio.create_task(self.enqueue_height(height_packet))
+
 
                 # Luôn gửi packet (dù people_list rỗng)
                 packet = {
@@ -378,7 +380,19 @@ class FrameProcessor:
                     self.call_count += 1
             except Exception as e:
                 logger.error(f"Lỗi không mong muốn trong xử lý lô: {e}", exc_info=True)
-            
+
+    async def enqueue_height(self, height_packet):
+        # nếu queue full thì loại bỏ phần tử cũ nhất
+        if self.height_queue.full():
+            try:
+                # nhanh gọn, không đợi
+                self.height_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+
+        # giờ chắc chắn còn chỗ, put vào
+        await self.height_queue.put(height_packet)
+
 # --------------------------------------------------------------------
 # HÀM KHỞI TẠO WORKER
 # --------------------------------------------------------------------
