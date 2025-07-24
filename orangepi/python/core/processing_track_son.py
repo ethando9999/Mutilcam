@@ -12,7 +12,6 @@ from collections import Counter
 # Giả định các module này tồn tại và hoạt động đúng
 from utils.logging_python_orangepi import get_logger
 from utils.yolo_pose import HumanDetection
-from utils.pose_color_signature_new import PoseColorSignatureExtractor
 from utils.cut_body_part import extract_body_parts_from_frame
 from .stereo_projector import StereoProjector
 from .keypoints_handle import get_head_center, get_torso_box, adjust_keypoints_to_box
@@ -21,7 +20,7 @@ import config
 
 # ======================= PHẦN MÃ MỚI ĐƯỢC THÊM VÀO =======================
 # --- TÍCH HỢP CÁC MODULE PHÂN TÍCH ---
-from color.pose_color_signature_son import PoseColorAnalyzer
+from color.pose_color_signature_new import PoseColorAnalyzer
 from color.clothing_classifier_son import ClothingClassifier
 from gender_yolo import GenderRecognition
 # ===================== KẾT THÚC PHẦN MÃ MỚI ĐƯỢC THÊM VÀO =====================
@@ -36,11 +35,10 @@ class FrameProcessor:
     Tích hợp logic gửi dữ liệu qua WebSocket một cách thông minh và làm mịn dữ liệu.
     """
     def __init__(self, calib_path: str, people_count_queue: asyncio.Queue, height_queue: asyncio.Queue, batch_size: int = 2):
-        """
+        """ 
         Khởi tạo tất cả các module cần thiết và các biến trạng thái.
         """
         self.detector = HumanDetection()
-        self.pose_processor = PoseColorSignatureExtractor()
         self.stereo_projector = StereoProjector(calib_file_path=calib_path)
         
         mtx_rgb = self.stereo_projector.params.get('mtx_rgb')
@@ -61,7 +59,7 @@ class FrameProcessor:
             pants_color_similarity_threshold=config.OPI_CONFIG.get("PANTS_COLOR_THRESHOLD", 40.0)
         )
 
-        # PoseColorAnalyzer đơn giản hóa
+        # PoseColorAnalyzer đơn giản hóa 
         self.color_extractor = PoseColorAnalyzer(
             line_thickness=config.OPI_CONFIG.get("LINE_THICKNESS", 30)
         )

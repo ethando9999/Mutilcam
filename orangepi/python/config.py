@@ -33,7 +33,7 @@ OPI_CONFIG = {
     "rgb_device_path": "/dev/rgb_cam",
     "rgb_resolution": (640, 480),
     "rgb_framerate": 15,
-    "CAM_ANGLE_DEG": 20,
+    "CAM_ANGLE_DEG": 45,
 
     # --- Cấu hình Processor ---
     "calib_file_path": os.path.join(os.path.dirname(BASE_DIR), "python/calibration/cali_result", "cam105_0353.npz"),

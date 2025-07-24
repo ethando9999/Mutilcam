@@ -16,7 +16,7 @@ class HeightEstimator:
         self.MINIMUM_DISTANCE = 0.7
         self.ANKLE_TO_FLOOR_COMPENSATION = 0.08
         self.KNEE_TO_FLOOR_COMPENSATION = 0.5 
-        self.TORSO_TO_HEIGHT_RATIO = 3.85
+        self.TORSO_TO_HEIGHT_RATIO = 3.76
         self.HEIGHT_VALID_RANGE = (1.40, 2.10) 
 
         logger.info(f"HeightEstimator initialized. Method: Hierarchical 3D Projection (v20). Min_Dist: {self.MINIMUM_DISTANCE}m")
