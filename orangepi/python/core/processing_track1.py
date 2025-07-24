@@ -462,7 +462,7 @@ class FrameProcessor:
                 if heights_cm:
                     height_packet = {"table_id": self.table_id, "heights_cm": heights_cm}
                     # schedule, không chờ
-                    # asyncio.create_task(self.enqueue_height(height_packet)) 
+                    asyncio.create_task(self.enqueue_height(height_packet)) 
 
                 # Tạo danh sách người với các trường cần thiết
                 people_list = [

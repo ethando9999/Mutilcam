@@ -13,10 +13,10 @@ class HeightEstimator:
         self.cx, self.cy = mtx_rgb[0, 2], mtx_rgb[1, 2]
         
         # --- CÁC HẰNG SỐ CẤU HÌNH ---
-        self.MINIMUM_DISTANCE = 0.5
+        self.MINIMUM_DISTANCE = 0.7
         self.ANKLE_TO_FLOOR_COMPENSATION = 0.08
         self.KNEE_TO_FLOOR_COMPENSATION = 0.5 
-        self.TORSO_TO_HEIGHT_RATIO = 4
+        self.TORSO_TO_HEIGHT_RATIO = 3.85
         self.HEIGHT_VALID_RANGE = (1.40, 2.10) 
 
         logger.info(f"HeightEstimator initialized. Method: Hierarchical 3D Projection (v20). Min_Dist: {self.MINIMUM_DISTANCE}m")

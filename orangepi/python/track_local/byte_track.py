@@ -22,9 +22,9 @@ class TrackingManager:
         detection_queue: asyncio.Queue,
         # << THAY ĐỔI 1: Đơn giản hóa, chỉ nhận một hàng đợi đầu ra >>
         track_profile_queue: asyncio.Queue,
-        track_thresh: float = 0.5,
-        max_time_lost: int = 30,
-        iou_threshold: float = 0.6,
+        track_thresh: float = 0.4,
+        max_time_lost: int = 60,
+        iou_threshold: float = 0.5,
         ema_alpha: float = 0.9,
     ):
         self.detection_queue = detection_queue
@@ -294,6 +294,14 @@ class TrackingManager:
                     profile_packet = self._format_profile_payload(
                         track_id, track_data, camera_id, time_detect, frame_id, total_detected_in_frame
                     )
+
+                    # Nếu queue đầy, loại bỏ phần tử cũ nhất
+                    if self.track_profile_queue.full():
+                        try:
+                            _ = self.track_profile_queue.get_nowait()
+                        except asyncio.QueueEmpty: 
+                            pass
+
                     await self.track_profile_queue.put(profile_packet)
                     profile_packets_sent += 1
             if profile_packets_sent > 0:
@@ -303,12 +311,12 @@ class TrackingManager:
         """
         Vòng lặp chính, nhận packet từ detection_queue và xử lý.
         """
-        logger.info("Tracking task started (Single-Payload Profile Mode)...")
+        logger.info("Tracking task started (Single-Payload Profile Mode)...") 
         while True:
             try:
                 pkt = await self.detection_queue.get()
                 if pkt is None:
-                    logger.info("Shutting down TrackingManager.")
+                    logger.info("Shutting down TrackingManager.") 
                     break
                 await self.process_track(pkt)
             except Exception as e:
