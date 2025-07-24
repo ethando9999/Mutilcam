@@ -158,13 +158,12 @@ class TrackingManager:
                 tr['mean'], tr['cov'] = self.kf.update(tr['mean'], tr['cov'], meas)
                 tr['time_since_update'] = 0
                 tr['hits'] += 1
-                # EMA score update
                 tr['score'] = self.ema_alpha * det['bbox'][4] + (1 - self.ema_alpha) * tr['score']
                 tr['world_point'] = det['world_point']
                 tr['attributes'] = det['attributes']
+                tr['est_height_m'] = det.get('est_height_m')
                 results[d] = t
                 det_high.pop(d, None)
-            # update active pool
             active = [tid for tid in active if tid not in un_t]
 
         # 5) Stage 2: rescue with low-confidence
@@ -179,6 +178,7 @@ class TrackingManager:
             tr['score'] = self.ema_alpha * det['bbox'][4] + (1 - self.ema_alpha) * tr['score']
             tr['world_point'] = det['world_point']
             tr['attributes'] = det['attributes']
+            tr['est_height_m'] = det.get('est_height_m')
             results[d] = t
             det_low.pop(d, None)
 
@@ -194,6 +194,7 @@ class TrackingManager:
             tr['score'] = self.ema_alpha * det['bbox'][4] + (1 - self.ema_alpha) * tr['score']
             tr['world_point'] = det['world_point']
             tr['attributes'] = det['attributes']
+            tr['est_height_m'] = det.get('est_height_m')
             results[d] = t
             det_high.pop(d, None)
 
@@ -210,13 +211,14 @@ class TrackingManager:
                 'hits': 1,
                 'score': det['bbox'][4],
                 'world_point': det['world_point'],
-                'attributes': det['attributes']   
+                'attributes': det['attributes'],
+                'est_height_m': det.get('est_height_m')  # ✅ FIXED: lưu chiều cao
             }
             results[d] = tid
 
         # 8) Remove stale tracks
         to_del = [tid for tid, tr in self.tracks.items()
-                  if tr['time_since_update'] > self.max_time_lost]
+                if tr['time_since_update'] > self.max_time_lost]
         for tid in to_del:
             del self.tracks[tid]
             logger.info(f"Removed stale track: {tid}")
