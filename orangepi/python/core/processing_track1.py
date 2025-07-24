@@ -460,9 +460,20 @@ class FrameProcessor:
                     if res.get("est_height_m") is not None
                 ]
                 if heights_cm:
-                    height_packet = {"table_id": self.table_id, "heights_cm": heights_cm}
-                    # schedule, không chờ
-                    asyncio.create_task(self.enqueue_height(height_packet)) 
+                    # Có ít nhất một người → gửi danh sách các chiều cao
+                    height_packet = {
+                        "table_id": self.table_id,
+                        "heights_cm": heights_cm
+                    }
+                else:
+                    # Không có người → gửi giá trị 0
+                    height_packet = {
+                        "table_id": self.table_id,
+                        "heights_cm": [0]
+                }
+
+                # luôn schedule task enqueue, không chờ
+                asyncio.create_task(self.enqueue_height(height_packet))
 
                 # Tạo danh sách người với các trường cần thiết
                 people_list = [

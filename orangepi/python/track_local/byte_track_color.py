@@ -3,10 +3,14 @@ import uuid
 from collections import OrderedDict
 from scipy.optimize import linear_sum_assignment
 import asyncio
+from datetime import datetime
+import config
 from .kalman_filter_2D import KalmanFilter2D, chi2inv95
 from utils.logging_python_orangepi import get_logger
 
 logger = get_logger(__name__)
+
+device_id = config.OPI_CONFIG.get("device_id")
 
 class TrackingManager:
     """
@@ -242,6 +246,8 @@ class TrackingManager:
         height_m = track_data.get('est_height_m')
         
         return {
+            "frame_id": frame_id,
+            "total_detect": total_detected_in_frame, # << Đã sửa: dùng đúng tổng số người phát hiện
             "person_id": str(track_id),
             "gender": gender_analysis.get('gender', 'Unknown').capitalize(),
             "torso_color": format_color_list(raw_colors.get('torso_colors')),
@@ -250,75 +256,57 @@ class TrackingManager:
             "pants_status": classification.get('pants_type', 'Unknown'),
             "skin_tone": classification.get('skin_tone_bgr'),
             "height": round(height_m, 2) if height_m is not None else None,
+            "time_detect": time_detect,
+            "camera_id": camera_id,
             "world_point_xy": track_data.get('world_point')
         }
 
     # --- PHƯƠNG THỨC XỬ LÝ CHÍNH ---
     async def process_track(self, packet: dict):
         """
-        Xử lý packet từ detection, chạy tracking, và gửi 1 payload chứa
-        tất cả người trong frame vào hàng đợi profile.
+        Xử lý packet từ detection, chạy tracking, và gửi payload chi tiết
+        vào hàng đợi profile.
         """
         camera_id = packet.get('camera_id')
         frame_id = packet.get('frame_id')
         time_detect = packet.get('time_detect')
         people = packet.get('people_list', [])
+
+        # << THAY ĐỔI 2: Lấy tổng số người được phát hiện từ packet đầu vào >>
         total_detected_in_frame = len(people)
 
-        # Chuẩn bị dict cho update
         dets = {
             f"det_{i}": {
-                'bbox': p['bbox'],
-                'world_point': p['world_point_xy'],
-                'attributes': p['attributes'],
-                'est_height_m': p.get('est_height_m'),
-            }
-            for i, p in enumerate(people)
+                'bbox': p['bbox'], 'world_point': p['world_point_xy'],
+                'attributes': p['attributes'], 'est_height_m': p.get('est_height_m'),
+            } for i, p in enumerate(people)
         }
 
         mapping = self.update(dets)
 
-        # Nếu không có mapping thì không gửi gì cả
-        if not mapping:
-            return
+        # Gửi payload chi tiết cho từng người được kết hợp thành công trong frame này
+        if mapping:
+            profile_packets_sent = 0
+            for det_key, track_id in mapping.items():
+                if track_id in self.tracks:
+                    track_data = self.tracks[track_id]
+                    # << THAY ĐỔI 3: Truyền `total_detected_in_frame` vào hàm định dạng >>
+                    profile_packet = self._format_profile_payload(
+                        track_id, track_data, camera_id, time_detect, frame_id, total_detected_in_frame
+                    )
 
-        # Gom các profile payload
-        profiles = []
-        for det_key, track_id in mapping.items():
-            if track_id not in self.tracks:
-                continue
-            track_data = self.tracks[track_id]
-            profiles.append(
-                self._format_profile_payload(
-                    track_id,
-                    track_data,
-                    camera_id,
-                    time_detect,
-                    frame_id,
-                    total_detected_in_frame
-                )
-            )
+                    # Nếu queue đầy, loại bỏ phần tử cũ nhất
+                    if self.track_profile_queue.full():
+                        try:
+                            _ = self.track_profile_queue.get_nowait()
+                        except asyncio.QueueEmpty: 
+                            pass
 
-        # Tạo batch packet
-        batch_packet = {
-            "frame_id": frame_id,
-            "time_detect": time_detect,
-            "camera_id": camera_id,
-            "total_detect": total_detected_in_frame,
-            "profiles": profiles
-        }
-
-        # Nếu queue đầy, loại bỏ element cũ nhất
-        if self.track_profile_queue.full():
-            try:
-                _ = self.track_profile_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-
-        # Đẩy 1 lần duy nhất
-        await self.track_profile_queue.put(batch_packet)
-        logger.info(f"[TRACK_PROFILE] Đã gửi batch packet với {len(profiles)} profiles (tổng phát hiện: {total_detected_in_frame}).")
-        
+                    await self.track_profile_queue.put(profile_packet)
+                    profile_packets_sent += 1
+            if profile_packets_sent > 0:
+                logger.info(f"[TRACK_PROFILE] Đã gửi {profile_packets_sent} packet chi tiết (tổng số phát hiện: {total_detected_in_frame}).")
+    
     async def run(self):
         """
         Vòng lặp chính, nhận packet từ detection_queue và xử lý.

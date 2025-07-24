@@ -52,7 +52,7 @@ OPI_CONFIG = {
     # "SOCKET_COUNT_URI": "ws://192.168.1.229:8080/api/ws/camera",
     # "SOCKET_HEIGHT_URI": "https://192.168.1.210:8080/api/ws/camera",
     # "SOCKET_TRACK_URI": "ws://192.168.1.247:8080/api/ws/camera",
-    "SOCKET_TRACK_COLOR_URI": "ws://192.168.1.247:9090/api/ws/camera",
+    "SOCKET_TRACK_COLOR_URI": "ws://192.168.1.135:9090/api/ws/camera",
     # "SOCKET_TABLE_ID": 1,
 
     # --- Cấu hình Re-ID ---

@@ -96,7 +96,7 @@ async def main(args):
             raise FileNotFoundError(f"File calib không tìm thấy: '{calib}'")
         tasks.append(
             asyncio.create_task(
-                start_processor(frame_q, proc_q, count_q, height_q, calib),
+                start_processor(frame_q, proc_q, count_q, height_q, calib), 
                 name="ProcessorTask"
             )
         )

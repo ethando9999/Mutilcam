@@ -58,12 +58,17 @@ class SocketSender:
                     logger.info(f"[{self.name}] ✅ Kết nối WebSocket thành công tới {self.uri}")
                     while True:
                         packet = await self.data_queue.get()
+
+                        # ← Thêm check ở đây
+                        if packet is None:
+                            logger.info(f"[{self.name}] 🔌 Shutdown signal received. Exiting sender loop.")
+                            self.data_queue.task_done()
+                            return
+
                         try:
                             message_to_send = json.dumps(packet, default=_numpy_converter)
-                            
-                            # << THAY ĐỔI: Thêm log để hiển thị payload >>
                             logger.info(f"[{self.name}] >> Gửi packet: {message_to_send}")
-                            
+                            print(f"[{self.name}] >> Gửi packet: {message_to_send}")
                             await websocket.send(message_to_send)
                         except TypeError as e:
                             logger.error(f"[{self.name}] Lỗi chuyển đổi JSON: {e}. Bỏ qua packet.")
