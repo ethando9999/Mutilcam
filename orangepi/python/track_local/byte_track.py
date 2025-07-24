@@ -278,10 +278,6 @@ class TrackingManager:
 
         mapping = self.update(dets)
 
-        # Nếu không có mapping thì không gửi gì cả
-        if not mapping:
-            return
-
         # Gom các profile payload
         profiles = []
         for det_key, track_id in mapping.items():

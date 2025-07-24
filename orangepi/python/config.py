@@ -42,16 +42,22 @@ OPI_CONFIG = {
     
     # <<< THÊM CẤU HÌNH MODULE PHÂN TÍCH VÀO ĐÂY >>>
     # [SỬA LỖI ĐƯỜNG DẪN] - Đảm bảo BASE_DIR trỏ đúng thư mục gốc của dự án
-    "SKIN_TONE_CSV_PATH": os.path.join(BASE_DIR, "core", "forearm_color_results_test.csv"), 
+    "SKIN_TONE_CSV_PATH": os.path.join(BASE_DIR, "color", "skin_tone.csv"),  
     
     "GENDER_MODEL_PATH": os.path.join(BASE_DIR, "models", "yolo11_gender_88test.pt"),
     "GENDER_CONFIDENCE_THRESHOLD": 0.75,
     # <<< KẾT THÚC PHẦN THÊM MỚI >>>
 
+    # color
+    "SLEEVE_COLOR_SIMILARITY_THRESHOLD": 10,
+    "PANTS_COLOR_SIMILARITY_THRESHOLD": 40, 
+    "LINE_THICKNESS": 30,
+    
+    # Skin detection (YCrCb bounds)
+    "SKIN_LOWER_BOUND_Y": 0, "SKIN_LOWER_BOUND_CR": 133, "SKIN_LOWER_BOUND_CB": 77,
+    "SKIN_UPPER_BOUND_Y": 255, "SKIN_UPPER_BOUND_CR": 173, "SKIN_UPPER_BOUND_CB": 127,
+
     # --- Cấu hình WebSocket ---
-    # "SOCKET_COUNT_URI": "ws://192.168.1.229:8080/api/ws/camera",
-    # "SOCKET_HEIGHT_URI": "https://192.168.1.210:8080/api/ws/camera",
-    # "SOCKET_TRACK_URI": "ws://192.168.1.247:8080/api/ws/camera",
     "SOCKET_TRACK_COLOR_URI": "ws://192.168.1.135:9090/api/ws/camera",
     # "SOCKET_TABLE_ID": 1,
 

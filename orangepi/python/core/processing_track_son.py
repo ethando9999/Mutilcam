@@ -1,4 +1,4 @@
-# file: python/core/processing_RGBD.py
+# file: python/core/processing_RGBD.py (Cập nhật khởi tạo và xử lý kết quả)
 
 import asyncio
 import cv2
@@ -21,9 +21,9 @@ import config
 
 # ======================= PHẦN MÃ MỚI ĐƯỢC THÊM VÀO =======================
 # --- TÍCH HỢP CÁC MODULE PHÂN TÍCH ---
-from color.pose_color_signature_tri import PoseColorAnalyzer
-from color.clothing_classifier_tri import ClothingClassifier
-from gender_yolo import GenderRecognition 
+from color.pose_color_signature_son import PoseColorAnalyzer
+from color.clothing_classifier_son import ClothingClassifier
+from gender_yolo import GenderRecognition
 # ===================== KẾT THÚC PHẦN MÃ MỚI ĐƯỢC THÊM VÀO =====================
 
 logger = get_logger(__name__)
@@ -47,18 +47,24 @@ class FrameProcessor:
         if mtx_rgb is None: raise ValueError("mtx_rgb không có trong file hiệu chỉnh.")
         self.height_estimator = HeightEstimator(mtx_rgb)
 
-        # <<< THAY ĐỔI 2: Lấy đường dẫn từ config và truyền vào khi khởi tạo >>>
+        # <<< THAY ĐỔI: Cập nhật khởi tạo các module theo logic mới >>>
         
-        # Sửa lỗi bằng cách truyền model_path từ config
+        # Gender recognizer (giữ nguyên)
         gender_model_path = config.OPI_CONFIG["GENDER_MODEL_PATH"]
         self.gender_recognizer = GenderRecognition(model_path=gender_model_path)
         
-        # Chủ động sửa luôn cho ClothingClassifier để nhất quán
+        # ClothingClassifier với logic mới - sử dụng skin CSV và các ngưỡng mới
         skin_csv_path = config.OPI_CONFIG["SKIN_TONE_CSV_PATH"]
-        self.clothing_classifier = ClothingClassifier(skin_csv_path=skin_csv_path)
+        self.clothing_classifier = ClothingClassifier(
+            skin_csv_path=skin_csv_path,
+            sleeve_color_similarity_threshold=config.OPI_CONFIG.get("SLEEVE_COLOR_THRESHOLD", 10.0),
+            pants_color_similarity_threshold=config.OPI_CONFIG.get("PANTS_COLOR_THRESHOLD", 40.0)
+        )
 
-        # Module này không yêu cầu tham số khi khởi tạo nên giữ nguyên
-        self.color_extractor = PoseColorAnalyzer()
+        # PoseColorAnalyzer đơn giản hóa
+        self.color_extractor = PoseColorAnalyzer(
+            line_thickness=config.OPI_CONFIG.get("LINE_THICKNESS", 30)
+        )
         
         self.analysis_output_dir = os.path.join(config.OPI_CONFIG.get("results_dir", "results"), "analysis_panels")
         os.makedirs(self.analysis_output_dir, exist_ok=True)
@@ -81,13 +87,12 @@ class FrameProcessor:
         self.table_id = config.OPI_CONFIG.get("SOCKET_TABLE_ID", 1)
         self.send_zero_flag = False
 
-        
-        logger.info("FrameProcessor (Tối ưu & Tích hợp Websocket với bộ đệm và phân tích nâng cao) đã được khởi tạo.")
+        logger.info("FrameProcessor (Cập nhật logic mới cho phân tích trang phục) đã được khởi tạo.")
+    
     # --------------------------------------------------------------------
-    # CÁC HÀM PHỤ TRỢ (HELPERS)
+    # CÁC HÀM PHỤ TRỢ (HELPERS) - Giữ nguyên
     # --------------------------------------------------------------------
     
-        # ======================= PHẦN MÃ MỚI ĐƯỢC THÊM VÀO =======================
     async def _get_clothing_analysis_async(self, rgb_frame: np.ndarray, keypoints: np.ndarray) -> Optional[Dict]:
         """
         Pipeline phân tích quần áo: gọi module xử lý đầy đủ và trả về kết quả.
@@ -107,7 +112,7 @@ class FrameProcessor:
             return None
 
     async def _create_analysis_panel_async(self, person_image: np.ndarray, attributes: dict, filename: str):
-        """[SỬA LỖI & CẬP NHẬT] Tạo ảnh panel từ gói thuộc tính mới."""
+        """[CẬP NHẬT] Tạo ảnh panel theo format kết quả mới."""
         try:
             gender_analysis = attributes.get("gender_analysis", {})
             clothing_analysis = attributes.get("clothing_analysis", {})
@@ -115,14 +120,14 @@ class FrameProcessor:
             raw_colors = clothing_analysis.get("raw_color_data", {})
 
             gender_label = gender_analysis.get('gender', 'N/A').capitalize()
-            sleeve_type = classification.get("sleeve_type", "N/A")
-            pants_type = classification.get("pants_type", "N/A")
+            
+            # <<< THAY ĐỔI: Cập nhật theo format kết quả mới >>>
+            sleeve_type = classification.get("sleeve_type", "KHONG THE XAC DINH")
+            pants_type = classification.get("pants_type", "KHONG THE XAC DINH")
+            skin_tone_id = classification.get("skin_tone_id")
+            skin_tone_bgr = classification.get("skin_tone_bgr")
 
-            display_data = {
-                f"Loai Ao: {sleeve_type}": raw_colors.get("torso_colors"),
-                f"Loai Quan: {pants_type}": raw_colors.get("thigh_colors"),
-            } 
-
+            # Tạo panel hiển thị
             img_h, img_w = person_image.shape[:2]
             panel_w = 400
             summary_h = max(img_h, 400)
@@ -138,14 +143,35 @@ class FrameProcessor:
             y_pos = draw_text("Ket Qua Phan Tich", y_pos, 0.7, 2)
             y_pos = draw_text(f"Gioi Tinh: {gender_label}", y_pos)
             
+            # Hiển thị kết quả phân loại mới
+            y_pos = draw_text(f"Ao: {sleeve_type}", y_pos, 0.6, 2)
+            y_pos = draw_text(f"Quan: {pants_type}", y_pos, 0.6, 2)
+            
+            # Hiển thị tone màu da nếu có
+            if sleeve_type == "AO NGAN TAY" and skin_tone_id and skin_tone_bgr:
+                y_pos = draw_text("Tone Da:", y_pos, 0.6, 2)
+                # Vẽ ô màu
+                cv2.rectangle(summary_img, (text_x, y_pos - 25), (text_x + 30, y_pos - 5), tuple(map(int, skin_tone_bgr)), -1)
+                cv2.rectangle(summary_img, (text_x, y_pos - 25), (text_x + 30, y_pos - 5), (0, 0, 0), 1)
+                draw_text(f"Tone #{skin_tone_id}", y_pos, 0.5)
+                y_pos += 25
+
+            # Hiển thị màu raw data nếu cần
+            display_data = {
+                "Mau Ao": raw_colors.get("torso_colors"),
+                "Mau Tay": raw_colors.get("forearm_colors"),
+                "Mau Dui": raw_colors.get("thigh_colors"),
+                "Mau Ong": raw_colors.get("shin_colors"),
+            }
+            
             for label, colors_data in display_data.items():
-                y_pos = draw_text(label, y_pos, 0.6, 2)
-                if colors_data:
-                    for color_info in sorted(colors_data, key=lambda x: x["percentage"], reverse=True)[:3]:
-                        bgr, pct = color_info["bgr"], color_info["percentage"]
-                        cv2.rectangle(summary_img, (text_x + 15, y_pos), (text_x + 45, y_pos + 20), tuple(map(int, bgr)), -1)
-                        draw_text(f"BGR: {bgr}, {pct:.1f}%", y_pos + 16, 0.5)
-                        y_pos += 25
+                if colors_data and colors_data[0]:  # Chỉ có 1 màu trong logic mới
+                    color_info = colors_data[0]
+                    bgr = color_info["bgr"]
+                    y_pos = draw_text(f"{label}:", y_pos, 0.5, 1)
+                    cv2.rectangle(summary_img, (text_x + 15, y_pos - 20), (text_x + 35, y_pos - 5), tuple(map(int, bgr)), -1)
+                    draw_text(f"BGR: {bgr}", y_pos, 0.4)
+                    y_pos += 20
             
             output_path = os.path.join(self.analysis_output_dir, filename)
             await self._run_in_executor(cv2.imwrite, output_path, summary_img)
@@ -153,6 +179,7 @@ class FrameProcessor:
         except Exception as e:
             logger.error(f"Không thể tạo panel '{filename}': {e}", exc_info=True)
     
+    # Các hàm helper khác giữ nguyên
     def _is_detection_valid(self, box: tuple, keypoints: np.ndarray, frame_shape: tuple) -> bool:
         x1, y1, x2, y2 = box
         h, w = frame_shape[:2]
@@ -217,7 +244,7 @@ class FrameProcessor:
         return int(lowest_foot[0]), int(lowest_foot[1])
 
     # --------------------------------------------------------------------
-    # HÀM XỬ LÝ CHÍNH (CORE PROCESSING)
+    # HÀM XỬ LÝ CHÍNH (CORE PROCESSING) - Phần lớn giữ nguyên
     # --------------------------------------------------------------------
 
     async def process_human_async(self, frame_id: int, rgb_frame: np.ndarray, tof_depth_map: np.ndarray, box: tuple, keypoints: np.ndarray):
@@ -248,7 +275,6 @@ class FrameProcessor:
 
                 world_point_xy = (x, y)
 
-
                 logger.info(f"✅ Người hợp lệ. Khoảng cách: {distance_mm/1000:.2f}m. Bắt đầu xử lý sâu...")
                 distance_m = distance_mm / 1000.0
 
@@ -264,12 +290,10 @@ class FrameProcessor:
                 gender_task = self._run_in_executor(self.gender_recognizer.predict, human_box_img)
                 clothing_task = self._get_clothing_analysis_async(human_box_img, adjusted_keypoints)
                 
-                
                 (est_height_m, height_status), body_parts_boxes, tof_box_projected, gender_analysis, clothing_analysis = await asyncio.gather(
                     height_task, body_parts_task, projection_task, gender_task, clothing_task,
                     return_exceptions=True # Xử lý lỗi riêng lẻ
                 )
-                
                 
                 if isinstance(gender_analysis, Exception):
                     logger.error(f"Lỗi phân tích giới tính: {gender_analysis}")
@@ -284,12 +308,17 @@ class FrameProcessor:
                     debug_base_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S%f')}_F{frame_id}"
                     asyncio.create_task(self.save_debug_images(debug_base_name, rgb_frame.copy(), tof_depth_map.copy(), box[:4], tof_box_projected))
                 
-                # Bỏ logic head_point_3d cũ
+                # <<< CẬP NHẬT: Log kết quả theo format mới >>>
+                clothing_classification = clothing_analysis.get("classification", {}) if clothing_analysis else {}
+                sleeve_info = clothing_classification.get("sleeve_type", "N/A")
+                pants_info = clothing_classification.get("pants_type", "N/A")
+                skin_tone_info = f"#{clothing_classification.get('skin_tone_id')}" if clothing_classification.get('skin_tone_id') else "N/A"
                 
                 logger.info(
                     f"✅✅ Xử lý hoàn tất: Khoảng cách={distance_m:.2f}m, "
                     f"Chiều cao={(f'{est_height_m:.2f}m' if est_height_m is not None else 'None')} ({height_status}), "
                     f"Giới tính={gender_analysis.get('gender', 'N/A') if gender_analysis else 'N/A'}, "
+                    f"Áo={sleeve_info}, Quần={pants_info}, Tone da={skin_tone_info}, "
                     f"Vị trí sàn={('({:.1f}, {:.1f}) cm'.format(*world_point_xy)) if world_point_xy else 'Không có'}"
                 )
                 
@@ -298,25 +327,21 @@ class FrameProcessor:
                     "clothing_analysis": clothing_analysis if not isinstance(clothing_analysis, Exception) else {},
                 }
                 
-                
-                # ======================= SỬA LỖI KEYERROR =======================
-                # Đổi tên key từ "human_box" thành "human_box_img" để nhất quán
                 result_data = {
                     "frame_id": frame_id, 
-                    "human_box_img": human_box_img, # <--- SỬA TÊN KEY Ở ĐÂY
+                    "human_box_img": human_box_img,
                     "body_parts": body_parts_boxes,
                     "world_point_xy": world_point_xy,
                     "bbox": box, 
                     "map_keypoints": keypoints,
                     "distance_mm": distance_mm, 
-                    "est_height_m": est_height_m, 
+                    "est_height_m": est_height_m,  
                     "height_status": height_status,
                     "time_detect": datetime.now().isoformat(),
                     "attributes": attributes
                 }
                 
                 # Tạo panel phân tích một cách bất đồng bộ
-                # Lệnh gọi này bây giờ sẽ hoạt động vì key đã được sửa
                 panel_filename = f"analysis_{device_id}_{frame_id}_{int(time.time())}.jpg"
                 asyncio.create_task(self._create_analysis_panel_async(
                     result_data["human_box_img"],
@@ -329,50 +354,35 @@ class FrameProcessor:
             except Exception as e:
                 logger.error(f"Lỗi xử lý người cho frame {frame_id}: {e}", exc_info=True)
                 return None
-                
+
+    # Các hàm còn lại giữ nguyên...
     async def _manage_people_count_state(self, current_person_count: int):
         """
         Quản lý bộ đệm đếm người và chỉ gửi đi giá trị ổn định nhất.
-        1. Đưa số lượng người hiện tại vào một queue tạm.
-        2. Khi queue tạm đủ số lượng (ví dụ: 5), lấy tất cả ra.
-        3. Tìm giá trị xuất hiện nhiều nhất (mode) trong các giá trị đó.
-        4. Gửi giá trị ổn định này vào queue chính để gửi qua WebSocket.
         """
-        # 1. Đưa số lượng người hiện tại vào queue tạm
         await self.temp_count_queue.put(current_person_count)
 
-        # 2. Kiểm tra nếu queue tạm đã đủ lớn để xử lý
         if self.temp_count_queue.qsize() >= self.count_buffer_size:
             counts_in_buffer = []
-            # Lấy chính xác `count_buffer_size` phần tử từ queue
             for _ in range(self.count_buffer_size):
                 try:
-                    # Lấy phần tử ra khỏi queue mà không cần chờ
                     count = self.temp_count_queue.get_nowait()
                     counts_in_buffer.append(count)
                 except asyncio.QueueEmpty:
-                    # Trường hợp hiếm gặp nếu queue bị rỗng giữa chừng
                     break
             
             if not counts_in_buffer:
-                return # Không có gì để xử lý
+                return
 
-            # 3. Tìm giá trị xuất hiện nhiều nhất (mode)
-            # Counter(counts_in_buffer).most_common(1) trả về list dạng [(giá_trị, số_lần_xuất_hiện)]
-            # ví dụ: Counter([5, 5, 6, 5, 5]).most_common(1) -> [(5, 4)]
-            # Chúng ta chỉ cần lấy giá trị (phần tử đầu tiên của tuple đầu tiên)
             stable_count = Counter(counts_in_buffer).most_common(1)[0][0]
-
             logger.info(f"Đã xử lý bộ đệm đếm: {counts_in_buffer} -> Gửi đi số lượng ổn định: {stable_count}")
 
-            # 4. Gửi giá trị ổn định này vào queue chính
             packet = {"total_person": stable_count}
             asyncio.create_task(self.people_count_queue.put(packet))
 
+    # Các hàm process_frame_queue, enqueue_height và start_processor giữ nguyên...
     async def process_frame_queue(self, frame_queue: asyncio.Queue, processing_queue: asyncio.Queue):
-        """
-        Vòng lặp chính: Lấy dữ liệu, điều phối tác vụ và gửi kết quả một cách tối ưu.
-        """
+        """Vòng lặp chính: Lấy dữ liệu, điều phối tác vụ và gửi kết quả một cách tối ưu."""
         frame_number = 0
         while True:
             start_time = time.time()
@@ -459,6 +469,7 @@ class FrameProcessor:
                     for res in valid_results
                     if res.get("est_height_m") is not None
                 ]
+
                 if heights_cm:
                     # Có ít nhất một người → gửi danh sách các chiều cao
                     height_packet = {
@@ -471,7 +482,6 @@ class FrameProcessor:
                         "table_id": self.table_id,
                         "heights_cm": [0]
                 }
-
                 # luôn schedule task enqueue, không chờ
                 asyncio.create_task(self.enqueue_height(height_packet))
 
@@ -498,7 +508,6 @@ class FrameProcessor:
 
                 # Đưa packet đã được tối ưu vào hàng đợi xử lý tracking
                 await processing_queue.put(packet)
-                # Sử dụng len(valid_results) trực tiếp vì nó tương đương len(people_list)
                 logger.info(f"Đã put packet với {len(valid_results)} người vào processing_queue")
 
                 # BƯỚC 5: Cập nhật FPS và frame_number
@@ -524,6 +533,7 @@ class FrameProcessor:
 
             # giờ chắc chắn còn chỗ, put vào
             await self.height_queue.put(height_packet)
+            logger.info(f"Da put vao height_queue: {height_packet}")
             
 # --------------------------------------------------------------------
 # HÀM KHỞI TẠO WORKER
@@ -542,5 +552,4 @@ async def start_processor(frame_queue: asyncio.Queue, processing_queue: asyncio.
         )
         await processor.process_frame_queue(frame_queue, processing_queue)
     except Exception as e:
-        logger.error(f"Lỗi nghiêm trọng trong start_processor: {e}", exc_info=True) 
-
+        logger.error(f"Lỗi nghiêm trọng trong start_processor: {e}", exc_info=True)

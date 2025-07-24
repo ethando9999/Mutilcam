@@ -9,9 +9,9 @@ import psutil
 from database.create_db import create_database
 from track_local.byte_track import TrackingManager
 import config
-from core.socket_sender import SocketSender
+from core.socket import start_socket_sender
 from core.put_RGBD import start_putter
-from core.processing_track1 import start_processor
+from core.processing_track_son import start_processor
 from SMC.web3_table_client import TableAIClient
 
 # Thiết lập logging
@@ -70,7 +70,7 @@ async def main(args):
     proc_q  = asyncio.Queue(maxsize=200)
     count_q = asyncio.Queue(maxsize=1)
     height_q= asyncio.Queue(maxsize=1)
-    track_q = asyncio.Queue(maxsize=1)
+    track_q = asyncio.Queue(maxsize=2) 
 
     # --- TableAIClient (blockchain sender) ---
     try:
@@ -96,7 +96,7 @@ async def main(args):
             raise FileNotFoundError(f"File calib không tìm thấy: '{calib}'")
         tasks.append(
             asyncio.create_task(
-                start_processor(frame_q, proc_q, count_q, height_q, calib), 
+                start_processor(frame_q, proc_q, count_q, height_q, calib),  
                 name="ProcessorTask"
             )
         )
@@ -108,15 +108,7 @@ async def main(args):
         )
 
         # 4. Socket senders
-        tasks.append(
-            asyncio.create_task(
-                SocketSender(ID_CFG["SOCKET_TRACK_COLOR_URI"], track_q, "TrackProfileSender").run(),
-                name="TrackProfileSender"
-            )
-        )
-        # nếu cần thêm sender cho count hoặc height, bỏ comment:
-        # tasks.append(asyncio.create_task(SocketSender(ID_CFG["SOCKET_COUNT_URI"], count_q, "CountSender").run(), name="CountSender"))
-        # tasks.append(asyncio.create_task(SocketSender(ID_CFG["SOCKET_HEIGHT_URI"], height_q, "HeightSender").run(), name="HeightSender"))
+        tasks.append(asyncio.create_task(start_socket_sender(track_q, config.OPI_CONFIG["SOCKET_TRACK_COLOR_URI"])))
 
         # 5. TableAIClient sender: gửi chiều cao tối thiểu lên blockchain
         tasks.append(
